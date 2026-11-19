@@ -6,12 +6,122 @@ import {
 } from '../config/opdSheets';
 import {
   AccountStatus,
+  AuthSheetConfig,
   OpdAccount,
   UserSession,
 } from '../types/satuData';
+import { extractGoogleSheetId } from './dynamicSheetService';
 
 const ACCOUNTS_STORAGE_KEY = 'satu_data_nagekeo_accounts_v3';
 const SESSION_STORAGE_KEY = 'satu_data_nagekeo_session_v3';
+const AUTH_CONFIG_STORAGE_KEY = 'satu_data_nagekeo_auth_sheet_cfg_v3';
+
+export function getActiveAuthSheetConfig(): AuthSheetConfig {
+  try {
+    const raw = localStorage.getItem(AUTH_CONFIG_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<AuthSheetConfig>;
+      if (parsed.sheetUrl || parsed.webhookUrl) {
+        const sheetUrl = parsed.sheetUrl || AUTH_SHEET_CONFIG.sheetUrl;
+        return {
+          sheetId:
+            extractGoogleSheetId(sheetUrl) ||
+            parsed.sheetId ||
+            AUTH_SHEET_CONFIG.sheetId,
+          sheetName: parsed.sheetName?.trim() || AUTH_SHEET_CONFIG.sheetName,
+          gid: parsed.gid || '0',
+          sheetUrl,
+          webhookUrl: parsed.webhookUrl?.trim() || AUTH_SHEET_CONFIG.webhookUrl,
+        };
+      }
+    }
+  } catch {
+    // Abaikan jika localStorage tidak tersedia
+  }
+  return AUTH_SHEET_CONFIG;
+}
+
+export function saveCustomAuthSheetConfig(input: {
+  sheetUrl: string;
+  sheetName: string;
+  webhookUrl: string;
+}): AuthSheetConfig {
+  const next: AuthSheetConfig = {
+    sheetId: extractGoogleSheetId(input.sheetUrl.trim()) || '',
+    sheetName: input.sheetName.trim() || 'Akun_OPD',
+    gid: '0',
+    sheetUrl: input.sheetUrl.trim(),
+    webhookUrl: input.webhookUrl.trim(),
+  };
+  try {
+    localStorage.setItem(AUTH_CONFIG_STORAGE_KEY, JSON.stringify(next));
+  } catch {
+    // Abaikan
+  }
+  return next;
+}
+
+export function resetCustomAuthSheetConfig(): AuthSheetConfig {
+  try {
+    localStorage.removeItem(AUTH_CONFIG_STORAGE_KEY);
+  } catch {
+    // Abaikan
+  }
+  return AUTH_SHEET_CONFIG;
+}
+
+export async function testAuthSheetConnection(
+  config: AuthSheetConfig
+): Promise<{ ok: boolean; latencyMs: number; message: string }> {
+  const start = performance.now();
+  if (isPlaceholderEndpoint(config.webhookUrl)) {
+    return {
+      ok: false,
+      latencyMs: 0,
+      message:
+        'URL Webhook Akun masih berupa template. Masukkan URL Web App (/exec) hasil deploy Code_Akun_OPD.gs.',
+    };
+  }
+  try {
+    const url = new URL(config.webhookUrl);
+    url.searchParams.set('action', 'list');
+    url.searchParams.set('sheet', config.sheetName || 'Akun_OPD');
+
+    const res = await fetch(url.toString(), {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+    });
+    const latencyMs = Math.round(performance.now() - start);
+    if (!res.ok) {
+      return {
+        ok: false,
+        latencyMs,
+        message: `Webhook merespons HTTP ${res.status}. Pastikan Web App dideploy dengan akses "Anyone".`,
+      };
+    }
+    const json = await res.json();
+    if (json && json.ok && Array.isArray(json.data)) {
+      return {
+        ok: true,
+        latencyMs,
+        message: `Terhubung ke Google Sheet Akun OPD (${json.data.length} akun terbaca).`,
+      };
+    }
+    return {
+      ok: false,
+      latencyMs,
+      message: json?.error || 'Respons Webhook Akun tidak valid.',
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      latencyMs: Math.round(performance.now() - start),
+      message: `Gagal terhubung: ${
+        err instanceof Error ? err.message : 'Network error'
+      }`,
+    };
+  }
+}
 
 export async function hashPassword(plain: string): Promise<string> {
   try {
@@ -81,13 +191,14 @@ export interface FetchAccountsResult {
 }
 
 export async function fetchAccountsFromSheet(): Promise<FetchAccountsResult> {
-  const webhookIsLive = !isPlaceholderEndpoint(AUTH_SHEET_CONFIG.webhookUrl);
+  const activeCfg = getActiveAuthSheetConfig();
+  const webhookIsLive = !isPlaceholderEndpoint(activeCfg.webhookUrl);
 
   if (webhookIsLive) {
     try {
-      const url = new URL(AUTH_SHEET_CONFIG.webhookUrl);
+      const url = new URL(activeCfg.webhookUrl);
       url.searchParams.set('action', 'list');
-      url.searchParams.set('sheet', AUTH_SHEET_CONFIG.sheetName);
+      url.searchParams.set('sheet', activeCfg.sheetName);
 
       const response = await fetch(url.toString(), {
         method: 'GET',
@@ -138,7 +249,7 @@ export async function fetchAccountsFromSheet(): Promise<FetchAccountsResult> {
     syncedFromSheet: false,
     message: webhookIsLive
       ? `Gagal menjangkau Webhook Akun OPD. Menampilkan ${local.length} akun lokal.`
-      : `Mode lokal aktif (${local.length} akun). Ganti AUTH_SHEET_CONFIG di src/config/opdSheets.ts untuk sinkronisasi Google Sheet Akun.`,
+      : `Mode lokal aktif (${local.length} akun). Daftarkan Google Sheet Akun Super Admin di menu Skrip Code.gs & Auth.`,
   };
 }
 
@@ -224,7 +335,9 @@ export async function registerOpdAccount(
   const nextAccounts = [newAccount, ...existingAccounts];
   saveLocalAccounts(nextAccounts);
 
-  if (isPlaceholderEndpoint(AUTH_SHEET_CONFIG.webhookUrl)) {
+  const activeCfg = getActiveAuthSheetConfig();
+
+  if (isPlaceholderEndpoint(activeCfg.webhookUrl)) {
     return {
       ok: true,
       account: newAccount,
@@ -234,12 +347,12 @@ export async function registerOpdAccount(
   }
 
   try {
-    const response = await fetch(AUTH_SHEET_CONFIG.webhookUrl, {
+    const response = await fetch(activeCfg.webhookUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
       body: JSON.stringify({
         action: 'register',
-        sheetName: AUTH_SHEET_CONFIG.sheetName,
+        sheetName: activeCfg.sheetName,
         account: newAccount,
       }),
     });
@@ -278,7 +391,9 @@ export async function updateOpdAccountStatus(
   const next = existingAccounts.map((a) => (a.id === updated.id ? updated : a));
   saveLocalAccounts(next);
 
-  if (isPlaceholderEndpoint(AUTH_SHEET_CONFIG.webhookUrl)) {
+  const activeCfg = getActiveAuthSheetConfig();
+
+  if (isPlaceholderEndpoint(activeCfg.webhookUrl)) {
     return {
       accounts: next,
       syncedToSheet: false,
@@ -287,12 +402,12 @@ export async function updateOpdAccountStatus(
   }
 
   try {
-    const res = await fetch(AUTH_SHEET_CONFIG.webhookUrl, {
+    const res = await fetch(activeCfg.webhookUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
       body: JSON.stringify({
         action: 'updateStatus',
-        sheetName: AUTH_SHEET_CONFIG.sheetName,
+        sheetName: activeCfg.sheetName,
         id: updated.id,
         status,
       }),
@@ -320,7 +435,9 @@ export async function deleteOpdAccount(
   const next = existingAccounts.filter((a) => a.id !== account.id);
   saveLocalAccounts(next);
 
-  if (isPlaceholderEndpoint(AUTH_SHEET_CONFIG.webhookUrl)) {
+  const activeCfg = getActiveAuthSheetConfig();
+
+  if (isPlaceholderEndpoint(activeCfg.webhookUrl)) {
     return {
       accounts: next,
       syncedToSheet: false,
@@ -329,12 +446,12 @@ export async function deleteOpdAccount(
   }
 
   try {
-    const res = await fetch(AUTH_SHEET_CONFIG.webhookUrl, {
+    const res = await fetch(activeCfg.webhookUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
       body: JSON.stringify({
         action: 'delete',
-        sheetName: AUTH_SHEET_CONFIG.sheetName,
+        sheetName: activeCfg.sheetName,
         id: account.id,
       }),
     });

@@ -14,9 +14,9 @@ import {
 } from 'lucide-react';
 import {
   APPS_SCRIPT_DYNAMIC_SHEET_TEMPLATE,
-  AUTH_SHEET_CONFIG,
   OPD_DIRECTORY,
 } from '../config/opdSheets';
+import { getActiveAuthSheetConfig } from '../services/authSheetService';
 import {
   AccountStatus,
   OpdAccount,
@@ -198,7 +198,7 @@ export function AkunOpdView({
           </button>
 
           <a
-            href={AUTH_SHEET_CONFIG.sheetUrl}
+            href={getActiveAuthSheetConfig().sheetUrl}
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex items-center gap-1.5 h-9 px-3.5 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-md hover:bg-slate-50 whitespace-nowrap"
