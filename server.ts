@@ -56,7 +56,7 @@ function getClientIp(req: express.Request): string {
 }
 
 function createGeminiClient(): GoogleGenAI | null {
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY;
   if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') return null;
   return new GoogleGenAI({
     apiKey,
@@ -66,6 +66,181 @@ function createGeminiClient(): GoogleGenAI | null {
       },
     },
   });
+}
+
+function buildHeuristicThreatAnalysis(snapshot: Record<string, unknown>) {
+  const events = Array.isArray(snapshot.insidenKeamananTerbaru)
+    ? (snapshot.insidenKeamananTerbaru as Array<Record<string, unknown>>)
+    : [];
+  const piiItems = Array.isArray(snapshot.paparanPiiTerdeteksi)
+    ? (snapshot.paparanPiiTerdeteksi as Array<Record<string, unknown>>)
+    : [];
+  const totalSheets = Number(snapshot.totalSheetTerdaftar || 0);
+  const activeSheets = Number(snapshot.totalSheetAktif || 0);
+  const blockedCount = events.filter((e) => Boolean(e.diblokir)).length;
+  const criticalCount = events.filter((e) => e.tingkat === 'Kritis').length;
+  const publicPiiCount = piiItems.filter((p) => Boolean(p.isPublic)).length;
+
+  let skorKeamanan = 92;
+  skorKeamanan -= criticalCount * 15;
+  skorKeamanan -= publicPiiCount * 18;
+  skorKeamanan -= Math.min(blockedCount * 2, 12);
+  if (totalSheets > activeSheets) skorKeamanan -= 5;
+  skorKeamanan = Math.max(15, Math.min(100, skorKeamanan));
+
+  const tingkatAncaman =
+    skorKeamanan >= 80
+      ? 'Rendah'
+      : skorKeamanan >= 60
+      ? 'Sedang'
+      : skorKeamanan >= 40
+      ? 'Tinggi'
+      : 'Kritis';
+
+  const temuanKerentanan: Array<{
+    judul: string;
+    tingkat: string;
+    vektorSerangan: string;
+    dampak: string;
+    rekomendasi: string;
+  }> = [];
+
+  if (publicPiiCount > 0) {
+    temuanKerentanan.push({
+      judul: 'Eksposur Kolom Data Pribadi (PII) pada Dataset Publik',
+      tingkat: 'Kritis',
+      vektorSerangan: 'Pengumpulan Data Pribadi / Scraping Publik (UU PDP)',
+      dampak:
+        'Kolom sensitif seperti NIK, No. HP, atau Alamat dapat disalahgunakan pihak tidak berwenang.',
+      rekomendasi:
+        'Hapus atau anonimisasi kolom PII pada menu Publikasi Kominfo sebelum status diubah menjadi Dipublikasikan.',
+    });
+  }
+
+  if (piiItems.length > publicPiiCount) {
+    temuanKerentanan.push({
+      judul: 'Kolom Sensitif Terdeteksi di Sheet Internal OPD',
+      tingkat: 'Sedang',
+      vektorSerangan: 'Salah Konfigurasi Hak Akses Google Sheet',
+      dampak:
+        'Jika tautan Google Sheet OPD dibagikan publik, data penduduk berisiko bocor.',
+      rekomendasi:
+        'Pastikan izin berbagi Google Sheet OPD dibatasi hanya untuk akun resmi OPD dan Walidata, serta aktifkan PIN Hapus OPD.',
+    });
+  }
+
+  if (criticalCount > 0 || blockedCount > 0) {
+    temuanKerentanan.push({
+      judul: 'Aktivitas Percobaan Akses / Injeksi Terdeteksi di Log',
+      tingkat: criticalCount > 0 ? 'Tinggi' : 'Sedang',
+      vektorSerangan: 'Brute-Force Autentikasi / Injeksi Payload / Inspeksi',
+      dampak:
+        'Upaya pengambilalihan akun atau penyisipan skrip berbahaya pada sheet sektoral.',
+      rekomendasi:
+        'Pertahankan kunci otomatis 5 percobaan gagal, rotasi kata sandi berkala, dan pantau log insiden secara rutin.',
+    });
+  }
+
+  if (temuanKerentanan.length === 0) {
+    temuanKerentanan.push({
+      judul: 'Postur Keamanan Dasar Terjaga',
+      tingkat: 'Rendah',
+      vektorSerangan: 'Pemantauan Rutin Webhook & Kredensial',
+      dampak: 'Belum terdeteksi anomali serangan aktif pada telemetri saat ini.',
+      rekomendasi:
+        'Pastikan setiap OPD mengaktifkan PIN Keamanan Hapus dan gunakan password unik untuk setiap akun dinas.',
+    });
+  }
+
+  const deteksiAnomali: string[] = [];
+  if (blockedCount > 0) {
+    deteksiAnomali.push(
+      `Tercatat ${blockedCount} upaya mencurigakan yang berhasil diblokir otomatis oleh sistem.`
+    );
+  }
+  if (publicPiiCount > 0) {
+    deteksiAnomali.push(
+      `Terdeteksi ${publicPiiCount} dataset publikasi Kominfo yang memuat kolom berpotensi PII.`
+    );
+  }
+  if (deteksiAnomali.length === 0) {
+    deteksiAnomali.push(
+      'Tidak ditemukan pola brute-force, injeksi formula Google Sheets, atau anomali kritis pada log terbaru.'
+    );
+  }
+
+  return {
+    tingkatAncaman,
+    skorKeamanan,
+    ringkasanEksekutif: `Audit keamanan heuristik mencatat skor ${skorKeamanan}/100 dengan tingkat ancaman ${tingkatAncaman}. Terpantau ${totalSheets} sheet OPD (${activeSheets} aktif), ${blockedCount} insiden diblokir, dan ${publicPiiCount} peringatan PII publik.`,
+    temuanKerentanan,
+    deteksiAnomali,
+    langkahMitigasiPrioritas: [
+      'Ganti kredensial default Super Admin melalui environment variable server (SUPER_ADMIN_PASSWORD).',
+      'Wajibkan seluruh OPD mengaktifkan PIN Keamanan Hapus sebelum menghapus tab atau baris data.',
+      'Lakukan penyaringan kolom PII (NIK, No. HP, Alamat) sebelum mempublikasikan dataset di menu Publikasi Kominfo.',
+      'Audit berkala URL Webhook Apps Script (/exec) agar hanya berasal dari domain resmi script.google.com.',
+    ],
+  };
+}
+
+function buildHeuristicPayloadInspection(sample: string) {
+  const hasXss = /<\s*script|javascript:|on\w+\s*=|<\s*iframe/i.test(sample);
+  const hasSqli =
+    /(\bunion\b\s+\bselect\b|\bdrop\b\s+\btable\b|\bor\b\s+1\s*=\s*1|--\s*$)/i.test(
+      sample
+    );
+  const hasFormula = /^\s*[=+\-@]/.test(sample) || /=(IMPORTXML|IMPORTRANGE|IMPORTDATA|HYPERLINK|CMD)/i.test(sample);
+  const hasPii = /\b\d{16}\b/.test(sample) || /(nik|password|secret|token)\s*[:=]/i.test(sample);
+
+  if (hasXss) {
+    return {
+      status: 'Berbahaya',
+      kategoriSerangan: 'Cross-Site Scripting (XSS)',
+      penjelasan:
+        'Payload mengandung tag skrip atau event handler HTML yang dapat mengeksekusi kode berbahaya di browser pengguna.',
+      tindakanDisarankan:
+        'Tolak dan sanitasi input dengan menghapus tag HTML/skrip sebelum menyimpan atau menampilkannya.',
+    };
+  }
+  if (hasFormula) {
+    return {
+      status: 'Berbahaya',
+      kategoriSerangan: 'Google Sheets / CSV Formula Injection',
+      penjelasan:
+        'Input diawali karakter formula (=, +, -, @) atau fungsi eksternal Google Sheets yang berisiko mengeksekusi perintah atau menarik data keluar.',
+      tindakanDisarankan:
+        'Awali nilai sel dengan tanda petik tunggal (\') agar Google Sheets memperlakukannya murni sebagai teks biasa.',
+    };
+  }
+  if (hasSqli) {
+    return {
+      status: 'Berbahaya',
+      kategoriSerangan: 'SQL Injection',
+      penjelasan:
+        'Terdeteksi pola query SQL berbahaya yang biasa digunakan untuk memanipulasi basis data.',
+      tindakanDisarankan:
+        'Blokir payload, catat aktor pengirim di log insiden, dan pastikan seluruh query menggunakan parameterized input.',
+    };
+  }
+  if (hasPii) {
+    return {
+      status: 'Mencurigakan',
+      kategoriSerangan: 'Potensi Kebocoran PII / Kredensial',
+      penjelasan:
+        'Teks memuat pola angka 16 digit (mirip NIK) atau kata kunci kredensial sensitif.',
+      tindakanDisarankan:
+        'Lakukan masking atau hapus data pribadi tersebut sebelum dibagikan ke ruang publik.',
+    };
+  }
+  return {
+    status: 'Aman',
+    kategoriSerangan: 'Tidak Ada Ancaman Terdeteksi',
+    penjelasan:
+      'Tidak ditemukan pola XSS, SQL Injection, Formula Injection Google Sheets, maupun kebocoran kredensial pada sampel ini.',
+    tindakanDisarankan:
+      'Tetap terapkan validasi standar saat memasukkan data ke Google Sheet OPD.',
+  };
 }
 
 async function startServer() {
@@ -165,17 +340,16 @@ async function startServer() {
 
   // 2. AI Cyber Threat & Data Breach Analyzer (Defensive SOC Assistant for Diskominfo)
   app.post('/api/security/analyze-threats', async (req, res) => {
+    const snapshot = (req.body?.snapshot ?? {}) as Record<string, unknown>;
     const ai = createGeminiClient();
     if (!ai) {
-      return res.status(503).json({
-        ok: false,
-        error:
-          'Kunci API Gemini belum tersedia di server. Periksa pengaturan Secrets.',
+      return res.status(200).json({
+        ok: true,
+        analysis: buildHeuristicThreatAnalysis(snapshot),
       });
     }
 
     try {
-      const snapshot = req.body?.snapshot ?? {};
       const prompt = `Anda adalah Analis Keamanan Siber (SOC & Data Protection Officer) senior untuk portal pemerintahan "Satu Data Kabupaten Nagekeo" (Dinas Kominfo).
 Lakukan audit keamanan siber dan analisis risiko peretasan data secara mendalam berdasarkan telemetri nyata aplikasi berikut ini (JSON):
 ${JSON.stringify(snapshot, null, 2)}
@@ -237,36 +411,63 @@ Jawab HANYA dalam bahasa Indonesia profesional sesuai skema JSON.`;
                 description: '3 sampai 5 langkah mitigasi prioritas untuk Diskominfo.',
               },
             },
+            required: [
+              'tingkatAncaman',
+              'skorKeamanan',
+              'ringkasanEksekutif',
+              'temuanKerentanan',
+              'deteksiAnomali',
+              'langkahMitigasiPrioritas',
+            ],
           },
         },
       });
 
       const rawText = (response.text ?? '').trim();
-      const parsed = JSON.parse(rawText);
-      return res.status(200).json({ ok: true, analysis: parsed });
-    } catch (err) {
-      const message =
-        err instanceof Error ? err.message : 'Gagal menjalankan analisis AI.';
-      return res.status(500).json({ ok: false, error: message });
+      const parsed = JSON.parse(rawText) as Record<string, unknown>;
+      const fallback = buildHeuristicThreatAnalysis(snapshot);
+      return res.status(200).json({
+        ok: true,
+        analysis: {
+          tingkatAncaman: String(parsed.tingkatAncaman || fallback.tingkatAncaman),
+          skorKeamanan: Number(parsed.skorKeamanan ?? fallback.skorKeamanan),
+          ringkasanEksekutif: String(
+            parsed.ringkasanEksekutif || fallback.ringkasanEksekutif
+          ),
+          temuanKerentanan: Array.isArray(parsed.temuanKerentanan)
+            ? parsed.temuanKerentanan
+            : fallback.temuanKerentanan,
+          deteksiAnomali: Array.isArray(parsed.deteksiAnomali)
+            ? parsed.deteksiAnomali
+            : fallback.deteksiAnomali,
+          langkahMitigasiPrioritas: Array.isArray(parsed.langkahMitigasiPrioritas)
+            ? parsed.langkahMitigasiPrioritas
+            : fallback.langkahMitigasiPrioritas,
+        },
+      });
+    } catch {
+      return res.status(200).json({
+        ok: true,
+        analysis: buildHeuristicThreatAnalysis(snapshot),
+      });
     }
   });
 
   // 3. AI Suspicious Payload / Log Inspector (Defensive)
   app.post('/api/security/inspect-payload', async (req, res) => {
-    const ai = createGeminiClient();
-    if (!ai) {
-      return res.status(503).json({
-        ok: false,
-        error:
-          'Kunci API Gemini belum tersedia di server. Periksa pengaturan Secrets.',
-      });
-    }
-
     const sample = String(req.body?.payload ?? '').trim();
     if (!sample) {
       return res
         .status(400)
         .json({ ok: false, error: 'Masukkan teks, URL, atau payload untuk dianalisis.' });
+    }
+
+    const ai = createGeminiClient();
+    if (!ai) {
+      return res.status(200).json({
+        ok: true,
+        inspection: buildHeuristicPayloadInspection(sample),
+      });
     }
 
     try {
@@ -303,10 +504,11 @@ ${sample.slice(0, 4000)}
 
       const parsed = JSON.parse((response.text ?? '').trim());
       return res.status(200).json({ ok: true, inspection: parsed });
-    } catch (err) {
-      const message =
-        err instanceof Error ? err.message : 'Gagal menganalisis payload.';
-      return res.status(500).json({ ok: false, error: message });
+    } catch {
+      return res.status(200).json({
+        ok: true,
+        inspection: buildHeuristicPayloadInspection(sample),
+      });
     }
   });
 
