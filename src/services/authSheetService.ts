@@ -546,3 +546,47 @@ export async function authenticateUser(
     },
   };
 }
+
+const OPD_DELETE_PIN_PREFIX = 'satu_data_nagekeo_opd_delpin_v1_';
+
+export function hasOpdDeletePin(opdKey: string): boolean {
+  try {
+    return Boolean(localStorage.getItem(`${OPD_DELETE_PIN_PREFIX}${opdKey}`));
+  } catch {
+    return false;
+  }
+}
+
+export async function saveOpdDeletePin(
+  opdKey: string,
+  pin: string
+): Promise<void> {
+  const hashed = await hashPassword(`delpin:${opdKey}:${pin.trim()}`);
+  try {
+    localStorage.setItem(`${OPD_DELETE_PIN_PREFIX}${opdKey}`, hashed);
+  } catch {
+    // Abaikan
+  }
+}
+
+export async function verifyOpdDeletePin(
+  opdKey: string,
+  pin: string
+): Promise<boolean> {
+  try {
+    const stored = localStorage.getItem(`${OPD_DELETE_PIN_PREFIX}${opdKey}`);
+    if (!stored) return true;
+    const candidate = await hashPassword(`delpin:${opdKey}:${pin.trim()}`);
+    return stored === candidate;
+  } catch {
+    return false;
+  }
+}
+
+export function clearOpdDeletePin(opdKey: string): void {
+  try {
+    localStorage.removeItem(`${OPD_DELETE_PIN_PREFIX}${opdKey}`);
+  } catch {
+    // Abaikan
+  }
+}

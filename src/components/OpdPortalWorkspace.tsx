@@ -10,6 +10,7 @@ import {
   FileSpreadsheet,
   FolderOpen,
   Hash,
+  KeyRound,
   Lock,
   LogOut,
   Mail,
@@ -27,6 +28,12 @@ import {
   User,
   X,
 } from 'lucide-react';
+import {
+  clearOpdDeletePin,
+  hasOpdDeletePin,
+  saveOpdDeletePin,
+  verifyOpdDeletePin,
+} from '../services/authSheetService';
 import {
   exportDynamicRowsToCsv,
   extractGoogleSheetId,
@@ -124,9 +131,29 @@ export function OpdPortalWorkspace({
   );
   const [newTabName, setNewTabName] = useState('');
   const [loadingNewTab, setLoadingNewTab] = useState(false);
-  const [confirmDeleteTabId, setConfirmDeleteTabId] = useState<string | null>(
-    null
+
+  // Per-OPD Security PIN for delete protection
+  const opdPinKey = session.opdId || session.id;
+  const [pinEnabled, setPinEnabled] = useState<boolean>(() =>
+    hasOpdDeletePin(opdPinKey)
   );
+  const [pinModalOpen, setPinModalOpen] = useState(false);
+  const [pinOldInput, setPinOldInput] = useState('');
+  const [pinNewInput, setPinNewInput] = useState('');
+  const [pinConfirmInput, setPinConfirmInput] = useState('');
+  const [pinSetupError, setPinSetupError] = useState<string | null>(null);
+  const [pinSetupSuccess, setPinSetupSuccess] = useState<string | null>(null);
+  const [pinBusy, setPinBusy] = useState(false);
+
+  // Unified PIN-protected delete modal state
+  const [pendingDelete, setPendingDelete] = useState<
+    | { kind: 'sheet'; sheet: OpdDynamicSheet; label: string }
+    | { kind: 'row'; sheet: OpdDynamicSheet; row: DynamicSheetRow; label: string }
+    | null
+  >(null);
+  const [deletePinInput, setDeletePinInput] = useState('');
+  const [deletePinError, setDeletePinError] = useState<string | null>(null);
+  const [deletingBusy, setDeletingBusy] = useState(false);
 
   const currentSheet =
     activeSheets.find((s) => s.id === selectedSheetId) ??
@@ -260,6 +287,134 @@ export function OpdPortalWorkspace({
     }
   };
 
+  const openPinSettingsModal = () => {
+    setPinOldInput('');
+    setPinNewInput('');
+    setPinConfirmInput('');
+    setPinSetupError(null);
+    setPinSetupSuccess(null);
+    setPinModalOpen(true);
+  };
+
+  const handleSavePinSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setPinSetupError(null);
+    setPinSetupSuccess(null);
+
+    if (pinEnabled) {
+      const validOld = await verifyOpdDeletePin(opdPinKey, pinOldInput);
+      if (!validOld) {
+        setPinSetupError('PIN lama tidak sesuai.');
+        return;
+      }
+    }
+
+    if (!/^\d{4,6}$/.test(pinNewInput.trim())) {
+      setPinSetupError('PIN baru harus terdiri dari 4 sampai 6 digit angka.');
+      return;
+    }
+
+    if (pinNewInput.trim() !== pinConfirmInput.trim()) {
+      setPinSetupError('Konfirmasi PIN baru tidak cocok.');
+      return;
+    }
+
+    setPinBusy(true);
+    try {
+      await saveOpdDeletePin(opdPinKey, pinNewInput.trim());
+      setPinEnabled(true);
+      setPinOldInput('');
+      setPinNewInput('');
+      setPinConfirmInput('');
+      setPinSetupSuccess(
+        'PIN Keamanan Hapus berhasil disimpan. Setiap penghapusan tab, sheet, atau baris kini dilindungi PIN.'
+      );
+    } finally {
+      setPinBusy(false);
+    }
+  };
+
+  const handleDisablePin = async () => {
+    setPinSetupError(null);
+    setPinSetupSuccess(null);
+    const validOld = await verifyOpdDeletePin(opdPinKey, pinOldInput);
+    if (!validOld) {
+      setPinSetupError(
+        'Masukkan PIN saat ini dengan benar untuk menonaktifkan proteksi PIN.'
+      );
+      return;
+    }
+    clearOpdDeletePin(opdPinKey);
+    setPinEnabled(false);
+    setPinOldInput('');
+    setPinNewInput('');
+    setPinConfirmInput('');
+    setPinSetupSuccess('Proteksi PIN Hapus telah dinonaktifkan.');
+  };
+
+  const requestProtectedSheetDelete = (sheet: OpdDynamicSheet) => {
+    setDeletePinInput('');
+    setDeletePinError(null);
+    setPendingDelete({
+      kind: 'sheet',
+      sheet,
+      label: `Tab "${sheet.sheetName}" (${sheet.judulDataset})`,
+    });
+  };
+
+  const requestProtectedRowDelete = (
+    sheet: OpdDynamicSheet,
+    row: DynamicSheetRow,
+    rowIndex: number
+  ) => {
+    setDeletePinInput('');
+    setDeletePinError(null);
+    setPendingDelete({
+      kind: 'row',
+      sheet,
+      row,
+      label: `Baris #${rowIndex + 1} pada Tab "${sheet.sheetName}"`,
+    });
+  };
+
+  const handleConfirmProtectedDelete = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!pendingDelete) return;
+    setDeletePinError(null);
+
+    if (pinEnabled) {
+      if (!deletePinInput.trim()) {
+        setDeletePinError('Masukkan PIN Hapus OPD terlebih dahulu.');
+        return;
+      }
+      const ok = await verifyOpdDeletePin(opdPinKey, deletePinInput.trim());
+      if (!ok) {
+        setDeletePinError('PIN salah. Penghapusan dibatalkan demi keamanan data.');
+        return;
+      }
+    }
+
+    setDeletingBusy(true);
+    try {
+      if (pendingDelete.kind === 'sheet') {
+        const target = pendingDelete.sheet;
+        if (currentSheet?.id === target.id) {
+          const fallback = activeSheets.find((s) => s.id !== target.id);
+          setSelectedSheetId(fallback?.id ?? '');
+          resetDynamicForm();
+        }
+        onDeleteSheet(target);
+      } else {
+        await onDeleteDynamicRow(pendingDelete.sheet, pendingDelete.row);
+        setConfirmDeleteRowId(null);
+      }
+      setPendingDelete(null);
+      setDeletePinInput('');
+    } finally {
+      setDeletingBusy(false);
+    }
+  };
+
   return (
     <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900">
       <RunningSummaryTicker
@@ -318,6 +473,21 @@ export function OpdPortalWorkspace({
               Form &amp; Tabel Dinamis ({activeSheets.length})
             </button>
           </div>
+
+          <button
+            type="button"
+            onClick={openPinSettingsModal}
+            className={`inline-flex items-center gap-1.5 h-9 px-3 text-xs font-medium rounded-md border transition-colors whitespace-nowrap shrink-0 ${
+              pinEnabled
+                ? 'text-teal-800 bg-teal-50 border-teal-200 hover:bg-teal-100'
+                : 'text-slate-700 bg-white border-slate-300 hover:bg-slate-50'
+            }`}
+          >
+            <KeyRound className="w-3.5 h-3.5" />
+            <span className="hidden md:inline">
+              {pinEnabled ? 'PIN Hapus Aktif' : 'Atur PIN Hapus'}
+            </span>
+          </button>
 
           <button
             type="button"
@@ -630,7 +800,7 @@ export function OpdPortalWorkspace({
                               </a>
                               <button
                                 type="button"
-                                onClick={() => onDeleteSheet(s)}
+                                onClick={() => requestProtectedSheetDelete(s)}
                                 className="p-1.5 text-slate-400 hover:text-red-700 hover:bg-red-50 rounded-md"
                                 aria-label={`Hapus ${s.judulDataset}`}
                               >
@@ -753,46 +923,6 @@ export function OpdPortalWorkspace({
                       </span>
                       {sameWorkbookSheets.map((tabSheet) => {
                         const isCurrent = tabSheet.id === currentSheet.id;
-                        const isConfirmingDelete =
-                          confirmDeleteTabId === tabSheet.id;
-
-                        if (isConfirmingDelete) {
-                          return (
-                            <div
-                              key={tabSheet.id}
-                              className="inline-flex items-center gap-1 px-2 py-0.5 text-xs bg-red-50 border border-red-300 rounded-md whitespace-nowrap"
-                            >
-                              <span className="font-mono text-red-800">
-                                Hapus {tabSheet.sheetName}?
-                              </span>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  if (isCurrent) {
-                                    const fallback = activeSheets.find(
-                                      (s) => s.id !== tabSheet.id
-                                    );
-                                    setSelectedSheetId(fallback?.id ?? '');
-                                    resetDynamicForm();
-                                  }
-                                  onDeleteSheet(tabSheet);
-                                  setConfirmDeleteTabId(null);
-                                }}
-                                className="px-1.5 py-0.5 text-[11px] font-semibold text-white bg-red-600 rounded hover:bg-red-700"
-                              >
-                                Ya
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => setConfirmDeleteTabId(null)}
-                                className="px-1.5 py-0.5 text-[11px] font-medium text-slate-600 bg-white border border-slate-300 rounded hover:bg-slate-50"
-                              >
-                                Batal
-                              </button>
-                            </div>
-                          );
-                        }
-
                         return (
                           <div
                             key={tabSheet.id}
@@ -806,7 +936,6 @@ export function OpdPortalWorkspace({
                               type="button"
                               onClick={() => {
                                 setSelectedSheetId(tabSheet.id);
-                                setConfirmDeleteTabId(null);
                                 resetDynamicForm();
                               }}
                               className="pl-2.5 pr-1.5 py-1 text-xs font-mono"
@@ -815,8 +944,12 @@ export function OpdPortalWorkspace({
                             </button>
                             <button
                               type="button"
-                              onClick={() => setConfirmDeleteTabId(tabSheet.id)}
-                              title={`Hapus tab ${tabSheet.sheetName}`}
+                              onClick={() =>
+                                requestProtectedSheetDelete(tabSheet)
+                              }
+                              title={`Hapus tab ${tabSheet.sheetName}${
+                                pinEnabled ? ' (Dilindungi PIN)' : ''
+                              }`}
                               aria-label={`Hapus tab ${tabSheet.sheetName}`}
                               className={`pr-2 pl-1 py-1 rounded-r-md transition-colors ${
                                 isCurrent
@@ -1225,7 +1358,13 @@ export function OpdPortalWorkspace({
                                       <button
                                         type="button"
                                         onClick={() =>
-                                          setConfirmDeleteRowId(row._id)
+                                          pinEnabled
+                                            ? requestProtectedRowDelete(
+                                                currentSheet,
+                                                row,
+                                                idx
+                                              )
+                                            : setConfirmDeleteRowId(row._id)
                                         }
                                         className="p-1.5 text-slate-500 hover:text-red-700 hover:bg-red-50 rounded-md"
                                         aria-label="Hapus baris"
@@ -1248,6 +1387,280 @@ export function OpdPortalWorkspace({
           </div>
         )}
       </main>
+
+      {/* Modal 1: Pengaturan PIN Keamanan Hapus Milik OPD */}
+      {pinModalOpen && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="pin-settings-title"
+        >
+          <div className="w-full max-w-md bg-white border border-slate-200 rounded-xl shadow-xl overflow-hidden">
+            <div className="px-5 py-4 bg-[#0B1B2B] text-white flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <KeyRound className="w-4 h-4 text-teal-400 shrink-0" />
+                <div>
+                  <h3
+                    id="pin-settings-title"
+                    className="text-sm font-semibold"
+                  >
+                    PIN Keamanan Hapus — {session.namaOpd}
+                  </h3>
+                  <p className="text-[11px] text-slate-300">
+                    Mencegah penghapusan tab, sheet, atau baris secara tidak
+                    sengaja.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPinModalOpen(false)}
+                className="p-1 text-slate-400 hover:text-white rounded"
+                aria-label="Tutup pengaturan PIN"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSavePinSubmit} className="p-5 space-y-4">
+              {pinSetupError && (
+                <div className="p-3 text-xs text-red-700 bg-red-50 border border-red-200 rounded-md">
+                  {pinSetupError}
+                </div>
+              )}
+              {pinSetupSuccess && (
+                <div className="p-3 text-xs text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-md">
+                  {pinSetupSuccess}
+                </div>
+              )}
+
+              {pinEnabled && (
+                <div>
+                  <label
+                    htmlFor="pin-old"
+                    className="block text-xs font-medium text-slate-700 mb-1.5"
+                  >
+                    PIN Saat Ini
+                  </label>
+                  <input
+                    id="pin-old"
+                    type="password"
+                    inputMode="numeric"
+                    maxLength={6}
+                    value={pinOldInput}
+                    onChange={(e) =>
+                      setPinOldInput(e.target.value.replace(/\D/g, ''))
+                    }
+                    placeholder="Masukkan PIN lama"
+                    className="w-full h-10 px-3 text-sm font-mono tracking-widest bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
+                    required
+                  />
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label
+                    htmlFor="pin-new"
+                    className="block text-xs font-medium text-slate-700 mb-1.5"
+                  >
+                    {pinEnabled ? 'PIN Baru (4–6 angka)' : 'Buat PIN (4–6 angka)'}
+                  </label>
+                  <input
+                    id="pin-new"
+                    type="password"
+                    inputMode="numeric"
+                    maxLength={6}
+                    value={pinNewInput}
+                    onChange={(e) =>
+                      setPinNewInput(e.target.value.replace(/\D/g, ''))
+                    }
+                    placeholder="••••••"
+                    className="w-full h-10 px-3 text-sm font-mono tracking-widest bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
+                    required
+                  />
+                </div>
+                <div>
+                  <label
+                    htmlFor="pin-confirm"
+                    className="block text-xs font-medium text-slate-700 mb-1.5"
+                  >
+                    Ulangi PIN Baru
+                  </label>
+                  <input
+                    id="pin-confirm"
+                    type="password"
+                    inputMode="numeric"
+                    maxLength={6}
+                    value={pinConfirmInput}
+                    onChange={(e) =>
+                      setPinConfirmInput(e.target.value.replace(/\D/g, ''))
+                    }
+                    placeholder="••••••"
+                    className="w-full h-10 px-3 text-sm font-mono tracking-widest bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
+                    required
+                  />
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-3 border-t border-slate-200">
+                {pinEnabled ? (
+                  <button
+                    type="button"
+                    onClick={handleDisablePin}
+                    className="text-xs font-medium text-red-700 hover:text-red-900"
+                  >
+                    Nonaktifkan PIN
+                  </button>
+                ) : (
+                  <span className="text-[11px] text-slate-500">
+                    PIN dienkripsi SHA-256 khusus {session.namaOpd}.
+                  </span>
+                )}
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setPinModalOpen(false)}
+                    className="h-9 px-3.5 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-md hover:bg-slate-50"
+                  >
+                    Tutup
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={pinBusy}
+                    className="h-9 px-4 text-xs font-semibold text-white bg-teal-700 rounded-md hover:bg-teal-800 disabled:opacity-60"
+                  >
+                    {pinBusy
+                      ? 'Menyimpan...'
+                      : pinEnabled
+                      ? 'Perbarui PIN'
+                      : 'Aktifkan PIN'}
+                  </button>
+                </div>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal 2: Verifikasi PIN sebelum Menghapus Tab / Sheet / Baris */}
+      {pendingDelete && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="confirm-del-title"
+        >
+          <div className="w-full max-w-md bg-white border border-slate-200 rounded-xl shadow-xl overflow-hidden">
+            <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <Lock className="w-4 h-4 text-red-600 shrink-0" />
+                <h3
+                  id="confirm-del-title"
+                  className="text-sm font-semibold text-slate-900"
+                >
+                  {pinEnabled
+                    ? 'Verifikasi PIN Keamanan Hapus'
+                    : 'Konfirmasi Penghapusan'}
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPendingDelete(null)}
+                className="p-1 text-slate-400 hover:text-slate-900 rounded"
+                aria-label="Batal hapus"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form
+              onSubmit={handleConfirmProtectedDelete}
+              className="p-5 space-y-4"
+            >
+              <p className="text-xs text-slate-600 leading-relaxed">
+                Anda akan menghapus{' '}
+                <strong className="text-slate-900">{pendingDelete.label}</strong>
+                .{' '}
+                {pendingDelete.kind === 'sheet'
+                  ? 'File asli di Google Sheet tetap aman, namun daftar tab ini akan dihapus dari portal.'
+                  : 'Baris data ini akan dihapus dari daftar dan Google Sheet.'}
+              </p>
+
+              {deletePinError && (
+                <div className="p-2.5 text-xs text-red-700 bg-red-50 border border-red-200 rounded-md">
+                  {deletePinError}
+                </div>
+              )}
+
+              {pinEnabled ? (
+                <div>
+                  <label
+                    htmlFor="verify-del-pin"
+                    className="block text-xs font-medium text-slate-700 mb-1.5"
+                  >
+                    Masukkan PIN Hapus {session.namaOpd}
+                  </label>
+                  <input
+                    id="verify-del-pin"
+                    type="password"
+                    inputMode="numeric"
+                    maxLength={6}
+                    autoFocus
+                    value={deletePinInput}
+                    onChange={(e) => {
+                      setDeletePinInput(e.target.value.replace(/\D/g, ''));
+                      setDeletePinError(null);
+                    }}
+                    placeholder="Masukkan 4–6 digit PIN"
+                    className="w-full h-10 px-3 text-sm font-mono tracking-widest bg-white border border-slate-300 rounded-md focus:outline-none focus:border-red-600"
+                    required
+                  />
+                </div>
+              ) : (
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-md flex items-center justify-between gap-3">
+                  <span className="text-[11px] text-slate-600">
+                    PIN Hapus belum diaktifkan untuk {session.namaOpd}.
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPendingDelete(null);
+                      openPinSettingsModal();
+                    }}
+                    className="text-xs font-medium text-teal-700 hover:text-teal-900 whitespace-nowrap"
+                  >
+                    Atur PIN Sekarang
+                  </button>
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-200">
+                <button
+                  type="button"
+                  onClick={() => setPendingDelete(null)}
+                  className="h-9 px-3.5 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-md hover:bg-slate-50"
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  disabled={deletingBusy}
+                  className="h-9 px-4 text-xs font-semibold text-white bg-red-600 rounded-md hover:bg-red-700 disabled:opacity-60"
+                >
+                  {deletingBusy
+                    ? 'Menghapus...'
+                    : pinEnabled
+                    ? 'Verifikasi PIN & Hapus'
+                    : 'Ya, Hapus'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
