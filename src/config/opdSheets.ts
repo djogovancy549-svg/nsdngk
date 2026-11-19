@@ -1,4 +1,8 @@
-import { AuthSheetConfig, OpdDirectoryItem } from '../types/satuData';
+import {
+  AuthSheetConfig,
+  OpdDirectoryItem,
+  PublishSheetConfig,
+} from '../types/satuData';
 
 /**
  * KONFIGURASI GOOGLE SHEET & WEBHOOK PENYIMPANAN AKUN & REGISTRASI SHEET OPD
@@ -15,6 +19,19 @@ export const AUTH_SHEET_CONFIG: AuthSheetConfig = {
     'https://docs.google.com/spreadsheets/d/1NagekeoAkunOpdSheetID_GantiDenganIDAsli00/edit#gid=0',
   webhookUrl:
     'https://script.google.com/macros/s/AKfycbx_NAGEKEO_AKUN_OPD_WEBHOOK_GANTI_ASLI_00/exec',
+};
+
+/**
+ * KONFIGURASI GOOGLE SHEET PUBLIKASI MILIK SUPER ADMIN (DINAS KOMINFO)
+ * Menyimpan hasil cloning data terpilih dari OPD yang siap dipublikasikan.
+ */
+export const PUBLISH_SHEET_CONFIG: PublishSheetConfig = {
+  sheetId: '1NagekeoPublikasiKominfoID_GantiDenganIDAsli00',
+  sheetName: 'Katalog_Publikasi',
+  sheetUrl:
+    'https://docs.google.com/spreadsheets/d/1NagekeoPublikasiKominfoID_GantiDenganIDAsli00/edit#gid=0',
+  webhookUrl:
+    'https://script.google.com/macros/s/AKfycbx_NAGEKEO_PUBLIKASI_KOMINFO_WEBHOOK_GANTI_ASLI_00/exec',
 };
 
 /**
@@ -371,5 +388,192 @@ function doPost(e) {
     return authJson({ ok: false, error: 'Action tidak dikenal: ' + action });
   } catch (err) {
     return authJson({ ok: false, error: String(err) });
+  }
+}`;
+
+/**
+ * TEMPLATE GOOGLE APPS SCRIPT (Code_Publikasi_Kominfo.gs)
+ * -------------------------------------------------------
+ * Dipasang di Google Sheet Publikasi milik Super Admin (Dinas Kominfo).
+ * Menerima hasil cloning dataset (kolom & baris pilihan), membuat/memperbarui
+ * tab khusus data publikasi, dan mencatatnya pada tab Katalog_Publikasi.
+ */
+export const APPS_SCRIPT_PUBLISH_TEMPLATE = `/**
+ * Webhook Publikasi & Cloning Data — Dinas Kominfo Kabupaten Nagekeo
+ * (Code_Publikasi_Kominfo.gs)
+ * Pasang pada Google Spreadsheet Publikasi milik Super Admin / Diskominfo.
+ */
+
+const CATALOG_SHEET_NAME = 'Katalog_Publikasi';
+const CATALOG_HEADERS = [
+  'id',
+  'judulPublikasi',
+  'sourceOpdNama',
+  'kategori',
+  'targetTabName',
+  'jumlahKolom',
+  'jumlahBaris',
+  'statusPublikasi',
+  'ringkasan',
+  'dipublikasikanPada'
+];
+
+function pubJson(payload) {
+  return ContentService
+    .createTextOutput(JSON.stringify(payload))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+function getCatalogSheet(sheetName) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName(sheetName || CATALOG_SHEET_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(sheetName || CATALOG_SHEET_NAME);
+    sheet.appendRow(CATALOG_HEADERS);
+  }
+  return sheet;
+}
+
+function sanitizeTabName(name) {
+  return String(name || 'Publikasi_Data')
+    .replace(/[\\\\/?*\\[\\]:]/g, '_')
+    .trim()
+    .slice(0, 90) || 'Publikasi_Data';
+}
+
+function doGet(e) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const action = (e && e.parameter && e.parameter.action) || 'list';
+    const catalogName = (e && e.parameter && e.parameter.sheet) || CATALOG_SHEET_NAME;
+    const sheet = getCatalogSheet(catalogName);
+
+    if (action === 'ping') {
+      return pubJson({
+        ok: true,
+        spreadsheet: ss.getName(),
+        sheet: sheet.getName(),
+        rows: Math.max(0, sheet.getLastRow() - 1)
+      });
+    }
+
+    const values = sheet.getDataRange().getDisplayValues();
+    if (values.length <= 1) {
+      return pubJson({ ok: true, spreadsheet: ss.getName(), data: [] });
+    }
+
+    const headers = values[0];
+    const rows = values.slice(1).map(function(row) {
+      const obj = {};
+      headers.forEach(function(h, i) { obj[String(h).trim()] = row[i]; });
+      return obj;
+    });
+    return pubJson({ ok: true, spreadsheet: ss.getName(), data: rows });
+  } catch (err) {
+    return pubJson({ ok: false, error: String(err) });
+  }
+}
+
+function doPost(e) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const body = JSON.parse(e.postData.contents);
+    const action = body.action;
+    const catalog = getCatalogSheet(body.catalogSheetName || CATALOG_SHEET_NAME);
+
+    if (action === 'publishClone' && body.clone) {
+      const clone = body.clone;
+      const tabName = sanitizeTabName(clone.targetTabName || clone.judulPublikasi);
+      let dataSheet = ss.getSheetByName(tabName);
+      if (!dataSheet) {
+        dataSheet = ss.insertSheet(tabName);
+      } else {
+        dataSheet.clearContents();
+      }
+
+      const headers = Array.isArray(clone.selectedHeaders) ? clone.selectedHeaders : [];
+      const rows = Array.isArray(clone.rows) ? clone.rows : [];
+
+      if (headers.length > 0) {
+        const matrix = [headers];
+        rows.forEach(function(r) {
+          const vals = r.values || {};
+          matrix.push(headers.map(function(h) {
+            return vals[h] !== undefined ? String(vals[h]) : '';
+          }));
+        });
+        dataSheet.getRange(1, 1, matrix.length, headers.length).setValues(matrix);
+      }
+
+      // Upsert ke Katalog_Publikasi
+      const catValues = catalog.getDataRange().getValues();
+      const idIdx = catValues[0].indexOf('id');
+      const catalogRow = [
+        clone.id,
+        clone.judulPublikasi,
+        clone.sourceOpdNama,
+        clone.kategori || 'Sektoral',
+        tabName,
+        headers.length,
+        rows.length,
+        clone.statusPublikasi || 'Dipublikasikan',
+        clone.ringkasan || '',
+        clone.dipublikasikanPada || new Date().toISOString().slice(0, 10)
+      ];
+
+      let updated = false;
+      for (let i = 1; i < catValues.length; i++) {
+        if (String(catValues[i][idIdx]) === String(clone.id)) {
+          catalog.getRange(i + 1, 1, 1, CATALOG_HEADERS.length).setValues([catalogRow]);
+          updated = true;
+          break;
+        }
+      }
+      if (!updated) {
+        catalog.appendRow(catalogRow);
+      }
+
+      return pubJson({
+        ok: true,
+        action: 'publishClone',
+        tabName: tabName,
+        rowsWritten: rows.length
+      });
+    }
+
+    if (action === 'updateStatus') {
+      const catValues = catalog.getDataRange().getValues();
+      const idIdx = catValues[0].indexOf('id');
+      const statusIdx = catValues[0].indexOf('statusPublikasi');
+      for (let i = 1; i < catValues.length; i++) {
+        if (String(catValues[i][idIdx]) === String(body.id)) {
+          catalog.getRange(i + 1, statusIdx + 1).setValue(body.statusPublikasi);
+          return pubJson({ ok: true, action: 'updateStatus', id: body.id });
+        }
+      }
+      return pubJson({ ok: false, error: 'Dataset publikasi tidak ditemukan.' });
+    }
+
+    if (action === 'deleteClone') {
+      const catValues = catalog.getDataRange().getValues();
+      const idIdx = catValues[0].indexOf('id');
+      for (let i = 1; i < catValues.length; i++) {
+        if (String(catValues[i][idIdx]) === String(body.id)) {
+          catalog.deleteRow(i + 1);
+          break;
+        }
+      }
+      if (body.targetTabName) {
+        const targetSheet = ss.getSheetByName(sanitizeTabName(body.targetTabName));
+        if (targetSheet && ss.getSheets().length > 1) {
+          ss.deleteSheet(targetSheet);
+        }
+      }
+      return pubJson({ ok: true, action: 'deleteClone', id: body.id });
+    }
+
+    return pubJson({ ok: false, error: 'Action tidak dikenal: ' + action });
+  } catch (err) {
+    return pubJson({ ok: false, error: String(err) });
   }
 }`;

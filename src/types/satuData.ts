@@ -84,6 +84,7 @@ export type SyncSource = 'webhook' | 'sheet_csv' | 'local_cache';
 export type ActiveNavSection =
   | 'ringkasan'
   | 'data_masuk'
+  | 'publikasi'
   | 'akun_sheet'
   | 'konfigurasi'
   | 'aktivitas';
@@ -93,9 +94,35 @@ export type AuditActionType =
   | 'Daftar Sheet'
   | 'Cangkok Script'
   | 'Sinkronisasi Sheet'
+  | 'Publikasi Data'
   | 'Input Data OPD'
   | 'Ubah Data OPD'
   | 'Hapus Data OPD';
+
+export interface PublishSheetConfig {
+  sheetId: string;
+  sheetName: string;
+  sheetUrl: string;
+  webhookUrl: string;
+}
+
+export type PublishStatus = 'Draft' | 'Dipublikasikan';
+
+export interface PublishedDatasetClone {
+  id: string;
+  sourceSheetId: string;
+  sourceOpdNama: string;
+  sourceSheetName: string;
+  judulPublikasi: string;
+  kategori: string;
+  ringkasan: string;
+  targetTabName: string;
+  selectedHeaders: string[];
+  rows: DynamicSheetRow[];
+  statusPublikasi: PublishStatus;
+  dipublikasikanPada: string;
+  syncedToKominfoSheet: boolean;
+}
 
 export interface AuditLogEntry {
   id: string;

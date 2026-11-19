@@ -4,6 +4,7 @@ import {
   Code2,
   Database,
   FileSpreadsheet,
+  Globe,
   History,
   LogOut,
   ShieldCheck,
@@ -22,6 +23,7 @@ interface SidebarProps {
   rowsBySheet: Record<string, DynamicSheetRow[]>;
   pendingGraftCount: number;
   accountsCount: number;
+  publishedCount: number;
   mobileOpen: boolean;
   onCloseMobile: () => void;
   onSelectSection: (section: ActiveNavSection) => void;
@@ -35,6 +37,7 @@ const NAV_ITEMS: {
 }[] = [
   { id: 'ringkasan', label: 'Ringkasan Eksekutif', icon: BarChart3 },
   { id: 'data_masuk', label: 'Data Masuk (Read-Only)', icon: Database },
+  { id: 'publikasi', label: 'Cloning & Publikasi', icon: Globe },
   { id: 'akun_sheet', label: 'Akun & Cangkok Sheet', icon: Users },
   { id: 'konfigurasi', label: 'Skrip Code.gs & Auth', icon: Code2 },
   { id: 'aktivitas', label: 'Riwayat Aktivitas', icon: History },
@@ -46,6 +49,7 @@ export function Sidebar({
   rowsBySheet,
   pendingGraftCount,
   accountsCount,
+  publishedCount,
   mobileOpen,
   onCloseMobile,
   onSelectSection,
@@ -118,6 +122,10 @@ export function Sidebar({
                 {showPending ? (
                   <span className="font-mono tabular-nums text-xs font-semibold text-amber-300 shrink-0">
                     {pendingGraftCount}
+                  </span>
+                ) : item.id === 'publikasi' && publishedCount > 0 ? (
+                  <span className="font-mono tabular-nums text-xs text-teal-300 shrink-0">
+                    {publishedCount}
                   </span>
                 ) : item.id === 'akun_sheet' && accountsCount > 0 ? (
                   <span className="font-mono tabular-nums text-xs text-slate-400 shrink-0">

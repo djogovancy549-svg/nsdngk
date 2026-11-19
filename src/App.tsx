@@ -5,6 +5,7 @@ import { AkunOpdView } from './components/AkunOpdView';
 import { AuthGateView } from './components/AuthGateView';
 import { KonfigurasiView } from './components/KonfigurasiView';
 import { OpdPortalWorkspace } from './components/OpdPortalWorkspace';
+import { PublikasiKominfoView } from './components/PublikasiKominfoView';
 import { RingkasanView } from './components/RingkasanView';
 import { RunningSummaryTicker } from './components/RunningSummaryTicker';
 import { Sidebar } from './components/Sidebar';
@@ -29,6 +30,13 @@ import {
   sendDynamicRowMutation,
 } from './services/dynamicSheetService';
 import {
+  deleteCloneOnKominfoSheet,
+  loadPublishedClones,
+  pushCloneToKominfoSheet,
+  savePublishedClones,
+  updateCloneStatusOnKominfoSheet,
+} from './services/publishSheetService';
+import {
   AccountStatus,
   ActiveNavSection,
   AuditActionType,
@@ -36,6 +44,8 @@ import {
   DynamicSheetRow,
   OpdAccount,
   OpdDynamicSheet,
+  PublishStatus,
+  PublishedDatasetClone,
   UserSession,
 } from './types/satuData';
 
@@ -77,11 +87,20 @@ export default function App() {
   const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>(() =>
     loadInitialAuditLogs()
   );
+  const [publishedClones, setPublishedClones] = useState<
+    PublishedDatasetClone[]
+  >(() => loadPublishedClones());
   const [notice, setNotice] = useState<string | null>(null);
 
   const pendingGraftCount = useMemo(
     () => sheets.filter((s) => s.status === 'Menunggu Cangkok Script').length,
     [sheets]
+  );
+  const publishedActiveCount = useMemo(
+    () =>
+      publishedClones.filter((c) => c.statusPublikasi === 'Dipublikasikan')
+        .length,
+    [publishedClones]
   );
 
   const appendAuditLog = useCallback(
@@ -718,13 +737,110 @@ export default function App() {
     );
   }
 
-  // 3. Masuk sebagai Super Admin Walidata -> Cangkok Script & Terima Data Read-Only
+  // 3. Masuk sebagai Super Admin Walidata -> Cangkok Script, Terima Data Read-Only & Cloning Publikasi Kominfo
+  const handleCreatePublishedClone = async (
+    draft: Omit<
+      PublishedDatasetClone,
+      'id' | 'dipublikasikanPada' | 'syncedToKominfoSheet'
+    >
+  ) => {
+    const newClone: PublishedDatasetClone = {
+      ...draft,
+      id: `pub-${Date.now().toString(36)}`,
+      dipublikasikanPada: new Date().toISOString().slice(0, 10),
+      syncedToKominfoSheet: false,
+    };
+
+    const syncRes = await pushCloneToKominfoSheet(newClone);
+    const savedClone: PublishedDatasetClone = {
+      ...newClone,
+      syncedToKominfoSheet: syncRes.syncedToSheet,
+    };
+
+    setPublishedClones((prev) => {
+      const next = [savedClone, ...prev];
+      savePublishedClones(next);
+      return next;
+    });
+
+    appendAuditLog(
+      'Publikasi Data',
+      'Dinas Kominfo (Super Admin)',
+      savedClone.judulPublikasi,
+      `Cloning ${savedClone.rows.length} baris & ${savedClone.selectedHeaders.length} kolom dari ${savedClone.sourceOpdNama} ke tab ${savedClone.targetTabName}.`,
+      syncRes.syncedToSheet
+    );
+    setNotice(syncRes.message);
+  };
+
+  const handleToggleCloneStatus = async (
+    clone: PublishedDatasetClone,
+    statusPublikasi: PublishStatus
+  ) => {
+    const res = await updateCloneStatusOnKominfoSheet(clone, statusPublikasi);
+    setPublishedClones((prev) => {
+      const next = prev.map((c) =>
+        c.id === clone.id
+          ? {
+              ...c,
+              statusPublikasi,
+              syncedToKominfoSheet: res.syncedToSheet || c.syncedToKominfoSheet,
+            }
+          : c
+      );
+      savePublishedClones(next);
+      return next;
+    });
+    appendAuditLog(
+      'Publikasi Data',
+      'Dinas Kominfo (Super Admin)',
+      clone.judulPublikasi,
+      `Status publikasi diubah menjadi ${statusPublikasi}.`,
+      res.syncedToSheet
+    );
+    setNotice(res.message);
+  };
+
+  const handleResyncClone = async (clone: PublishedDatasetClone) => {
+    const res = await pushCloneToKominfoSheet(clone);
+    setPublishedClones((prev) => {
+      const next = prev.map((c) =>
+        c.id === clone.id
+          ? { ...c, syncedToKominfoSheet: res.syncedToSheet }
+          : c
+      );
+      savePublishedClones(next);
+      return next;
+    });
+    setNotice(res.message);
+  };
+
+  const handleDeleteClone = async (clone: PublishedDatasetClone) => {
+    const res = await deleteCloneOnKominfoSheet(clone);
+    setPublishedClones((prev) => {
+      const next = prev.filter((c) => c.id !== clone.id);
+      savePublishedClones(next);
+      return next;
+    });
+    appendAuditLog(
+      'Publikasi Data',
+      'Dinas Kominfo (Super Admin)',
+      clone.judulPublikasi,
+      `Menghapus dataset clone publikasi (${clone.targetTabName}).`,
+      res.syncedToSheet
+    );
+    setNotice(res.message);
+  };
+
   const breadcrumbTrail = (() => {
     if (activeSection === 'ringkasan') {
       return ['Super Admin', 'Ringkasan Eksekutif'];
     }
     if (activeSection === 'data_masuk') {
       return ['Super Admin', 'Data Masuk OPD (Read-Only)'];
+    }
+    if (activeSection === 'publikasi') {
+      return ['Super Admin', 'Cloning & Publikasi Kominfo'];
     }
     if (activeSection === 'akun_sheet') {
       return ['Super Admin', 'Akun & Cangkok Sheet OPD'];
@@ -743,6 +859,7 @@ export default function App() {
         rowsBySheet={rowsBySheet}
         pendingGraftCount={pendingGraftCount}
         accountsCount={accounts.length}
+        publishedCount={publishedActiveCount}
         mobileOpen={mobileMenuOpen}
         onCloseMobile={() => setMobileMenuOpen(false)}
         onSelectSection={setActiveSection}
@@ -846,6 +963,18 @@ export default function App() {
               syncingSheetId={syncingSheetId}
               onSyncSheet={handleSyncSheet}
               onGoToAkunSheet={() => setActiveSection('akun_sheet')}
+            />
+          )}
+
+          {activeSection === 'publikasi' && (
+            <PublikasiKominfoView
+              sheets={sheets}
+              rowsBySheet={rowsBySheet}
+              clones={publishedClones}
+              onCreateClone={handleCreatePublishedClone}
+              onToggleCloneStatus={handleToggleCloneStatus}
+              onResyncClone={handleResyncClone}
+              onDeleteClone={handleDeleteClone}
             />
           )}
 
