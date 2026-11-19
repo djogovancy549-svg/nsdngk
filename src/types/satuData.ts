@@ -86,8 +86,27 @@ export type ActiveNavSection =
   | 'data_masuk'
   | 'publikasi'
   | 'akun_sheet'
+  | 'keamanan'
   | 'konfigurasi'
   | 'aktivitas';
+
+export type SecuritySeverity = 'Rendah' | 'Sedang' | 'Tinggi' | 'Kritis';
+
+export interface SecurityEventEntry {
+  id: string;
+  timestamp: string;
+  kategori:
+    | 'Brute Force'
+    | 'Login Gagal'
+    | 'Injeksi Payload'
+    | 'Kebocoran PII'
+    | 'Audit AI';
+  tingkat: SecuritySeverity;
+  aktor: string;
+  target: string;
+  detail: string;
+  diblokir: boolean;
+}
 
 export type AuditActionType =
   | 'Akun OPD'
@@ -95,6 +114,7 @@ export type AuditActionType =
   | 'Cangkok Script'
   | 'Sinkronisasi Sheet'
   | 'Publikasi Data'
+  | 'Keamanan Siber'
   | 'Input Data OPD'
   | 'Ubah Data OPD'
   | 'Hapus Data OPD';

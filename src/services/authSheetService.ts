@@ -2,7 +2,7 @@ import {
   AUTH_SHEET_CONFIG,
   isPlaceholderEndpoint,
   OPD_DIRECTORY,
-  SUPER_ADMIN_CREDENTIALS,
+  SUPER_ADMIN_RESERVED_IDENTIFIERS,
 } from '../config/opdSheets';
 import {
   AccountStatus,
@@ -10,6 +10,12 @@ import {
   OpdAccount,
   UserSession,
 } from '../types/satuData';
+import {
+  appendSecurityEvent,
+  getLoginGuardStatus,
+  recordFailedLoginAttempt,
+  resetLoginGuard,
+} from './cyberSecurityService';
 import { extractGoogleSheetId } from './dynamicSheetService';
 
 const ACCOUNTS_STORAGE_KEY = 'satu_data_nagekeo_accounts_v3';
@@ -287,8 +293,8 @@ export async function registerOpdAccount(
   }
 
   if (
-    cleanUsername === SUPER_ADMIN_CREDENTIALS.username ||
-    cleanEmail === SUPER_ADMIN_CREDENTIALS.email
+    cleanUsername === SUPER_ADMIN_RESERVED_IDENTIFIERS.username ||
+    cleanEmail === SUPER_ADMIN_RESERVED_IDENTIFIERS.email
   ) {
     return {
       ok: false,
@@ -484,25 +490,74 @@ export async function authenticateUser(
 ): Promise<LoginResult> {
   const cleanId = identifier.trim().toLowerCase();
 
-  if (
-    (cleanId === SUPER_ADMIN_CREDENTIALS.username ||
-      cleanId === SUPER_ADMIN_CREDENTIALS.email) &&
-    password === SUPER_ADMIN_CREDENTIALS.password
-  ) {
+  // Cek proteksi brute-force klien
+  const guard = getLoginGuardStatus();
+  if (guard.locked) {
     return {
-      ok: true,
-      session: {
-        id: 'super-admin',
-        role: 'super_admin',
-        username: SUPER_ADMIN_CREDENTIALS.username,
-        email: SUPER_ADMIN_CREDENTIALS.email,
-        namaLengkap: SUPER_ADMIN_CREDENTIALS.namaLengkap,
-        opdId: null,
-        namaOpd: SUPER_ADMIN_CREDENTIALS.namaOpd,
-      },
+      ok: false,
+      message: `Akses sementara dikunci karena percobaan gagal berulang. Coba lagi dalam ${guard.remainingSec} detik.`,
     };
   }
 
+  // 1. Verifikasi Super Admin secara ketat di server (kredensial tersembunyi dari klien)
+  try {
+    const serverRes = await fetch('/api/auth/superadmin', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ identifier: cleanId, password }),
+    });
+
+    if (serverRes.status === 429) {
+      const data = await serverRes.json();
+      appendSecurityEvent({
+        kategori: 'Brute Force',
+        tingkat: 'Kritis',
+        aktor: cleanId || 'Anonim',
+        target: 'Autentikasi Super Admin',
+        detail:
+          data?.message ||
+          'Server memblokir upaya brute-force pada akun Super Admin.',
+        diblokir: true,
+      });
+      return {
+        ok: false,
+        message:
+          data?.message ||
+          'Terlalu banyak percobaan gagal. Akses dikunci oleh server.',
+      };
+    }
+
+    if (serverRes.ok || serverRes.status === 401) {
+      const data = await serverRes.json();
+      if (data.ok && data.session) {
+        resetLoginGuard();
+        return {
+          ok: true,
+          session: data.session as UserSession,
+        };
+      }
+      if (data.isSuperAdminCandidate) {
+        appendSecurityEvent({
+          kategori: 'Login Gagal',
+          tingkat: 'Tinggi',
+          aktor: cleanId,
+          target: 'Autentikasi Super Admin',
+          detail:
+            data?.message ||
+            'Percobaan masuk Super Admin gagal dengan kata sandi salah.',
+          diblokir: false,
+        });
+        return {
+          ok: false,
+          message: data?.message || 'Kredensial tidak sesuai.',
+        };
+      }
+    }
+  } catch {
+    // Jika server tidak merespons, lanjut cek akun OPD lokal
+  }
+
+  // 2. Verifikasi Akun OPD
   const candidate = accounts.find(
     (acc) =>
       acc.username.toLowerCase() === cleanId ||
@@ -510,10 +565,12 @@ export async function authenticateUser(
   );
 
   if (!candidate) {
+    const fail = recordFailedLoginAttempt(cleanId);
     return {
       ok: false,
-      message:
-        'Username atau email tidak ditemukan. Silakan daftar akun dinas terlebih dahulu.',
+      message: fail.locked
+        ? `Terlalu banyak percobaan gagal. Akses dikunci ${fail.remainingSec} detik.`
+        : `Username atau email tidak ditemukan. Sisa percobaan: ${fail.remainingAttempts}.`,
     };
   }
 
@@ -526,12 +583,16 @@ export async function authenticateUser(
 
   const inputHash = await hashPassword(password);
   if (candidate.passwordHash !== inputHash) {
+    const fail = recordFailedLoginAttempt(cleanId);
     return {
       ok: false,
-      message: 'Kata sandi tidak sesuai.',
+      message: fail.locked
+        ? `Kata sandi salah 5 kali berturut-turut. Akses dikunci ${fail.remainingSec} detik.`
+        : `Kata sandi tidak sesuai. Sisa percobaan: ${fail.remainingAttempts}.`,
     };
   }
 
+  resetLoginGuard();
   return {
     ok: true,
     session: {

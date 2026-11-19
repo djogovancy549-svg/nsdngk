@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { LogIn, ShieldCheck, UserPlus } from 'lucide-react';
-import { OPD_DIRECTORY, SUPER_ADMIN_CREDENTIALS } from '../config/opdSheets';
+import { OPD_DIRECTORY } from '../config/opdSheets';
 import {
   DynamicSheetRow,
   OpdAccount,
@@ -250,29 +250,15 @@ export function AuthGateView({
               </div>
             </div>
 
-            <div className="pt-4 border-t border-slate-200 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-500">
-              <span>
-                Akses Super Admin Walidata:{' '}
-                <code className="font-mono text-slate-800">
-                  {SUPER_ADMIN_CREDENTIALS.username}
-                </code>{' '}
-                /{' '}
-                <code className="font-mono text-slate-800">
-                  {SUPER_ADMIN_CREDENTIALS.password}
-                </code>
+            <div className="pt-4 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
+              <span className="inline-flex items-center gap-1.5">
+                <ShieldCheck className="w-3.5 h-3.5 text-teal-700 shrink-0" />
+                Dilindungi enkripsi SHA-256, proteksi brute-force &amp; audit AI
+                keamanan siber.
               </span>
-              <button
-                type="button"
-                onClick={() => {
-                  setMode('login');
-                  setIdentifier(SUPER_ADMIN_CREDENTIALS.username);
-                  setPassword(SUPER_ADMIN_CREDENTIALS.password);
-                  setLoginError(null);
-                }}
-                className="font-medium text-slate-900 underline decoration-slate-300 hover:decoration-slate-900 whitespace-nowrap"
-              >
-                Isi Kredensial Super Admin
-              </button>
+              <span className="text-[11px] text-slate-400">
+                Akses Walidata terbatas untuk administrator resmi.
+              </span>
             </div>
           </div>
 
@@ -307,7 +293,7 @@ export function AuthGateView({
                     type="text"
                     value={identifier}
                     onChange={(e) => setIdentifier(e.target.value)}
-                    placeholder="superadmin atau email dinas"
+                    placeholder="Masukkan username atau email terdaftar"
                     className="w-full h-10 px-3 text-sm bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
                     required
                   />

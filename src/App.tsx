@@ -3,6 +3,7 @@ import { Menu, RefreshCw, X } from 'lucide-react';
 import { AktivitasView } from './components/AktivitasView';
 import { AkunOpdView } from './components/AkunOpdView';
 import { AuthGateView } from './components/AuthGateView';
+import { KeamananSiberView } from './components/KeamananSiberView';
 import { KonfigurasiView } from './components/KonfigurasiView';
 import { OpdPortalWorkspace } from './components/OpdPortalWorkspace';
 import { PublikasiKominfoView } from './components/PublikasiKominfoView';
@@ -20,6 +21,11 @@ import {
   saveSession,
   updateOpdAccountStatus,
 } from './services/authSheetService';
+import {
+  clearSecurityEvents,
+  inspectAndSanitizeValues,
+  loadSecurityEvents,
+} from './services/cyberSecurityService';
 import {
   extractGoogleSheetId,
   fetchDynamicSheetData,
@@ -46,6 +52,7 @@ import {
   OpdDynamicSheet,
   PublishStatus,
   PublishedDatasetClone,
+  SecurityEventEntry,
   UserSession,
 } from './types/satuData';
 
@@ -90,6 +97,9 @@ export default function App() {
   const [publishedClones, setPublishedClones] = useState<
     PublishedDatasetClone[]
   >(() => loadPublishedClones());
+  const [securityEvents, setSecurityEvents] = useState<SecurityEventEntry[]>(
+    () => loadSecurityEvents()
+  );
   const [notice, setNotice] = useState<string | null>(null);
 
   const pendingGraftCount = useMemo(
@@ -101,6 +111,10 @@ export default function App() {
       publishedClones.filter((c) => c.statusPublikasi === 'Dipublikasikan')
         .length,
     [publishedClones]
+  );
+  const securityBlockedCount = useMemo(
+    () => securityEvents.filter((e) => e.diblokir).length,
+    [securityEvents]
   );
 
   const appendAuditLog = useCallback(
@@ -761,21 +775,35 @@ export default function App() {
     );
   };
 
-  // Dynamic Row CRUD (Executed ONLY by the owning OPD)
+  // Dynamic Row CRUD (Executed ONLY by the owning OPD, with real-time XSS/Formula-Injection guard)
   const handleSubmitDynamicRow = async (
     sheet: OpdDynamicSheet,
     row: DynamicSheetRow,
     isEdit: boolean
   ) => {
+    const scan = inspectAndSanitizeValues(
+      row.values,
+      session?.username || sheet.namaOpd,
+      `${sheet.judulDataset} (${sheet.sheetName})`
+    );
+    if (scan.threatsDetected.length > 0) {
+      setSecurityEvents(loadSecurityEvents());
+    }
+
+    const safeRow: DynamicSheetRow = {
+      ...row,
+      values: scan.sanitizedValues,
+    };
+
     const mutation = await sendDynamicRowMutation(
       sheet,
       isEdit ? 'update' : 'create',
-      row
+      safeRow
     );
 
     const savedRow: DynamicSheetRow = {
-      ...row,
-      _rowNumber: mutation.rowNumber ?? row._rowNumber,
+      ...safeRow,
+      _rowNumber: mutation.rowNumber ?? safeRow._rowNumber,
     };
 
     setRowsBySheet((prev) => {
@@ -968,6 +996,9 @@ export default function App() {
     if (activeSection === 'akun_sheet') {
       return ['Super Admin', 'Akun & Cangkok Sheet OPD'];
     }
+    if (activeSection === 'keamanan') {
+      return ['Super Admin', 'Keamanan Siber & AI Deteksi Peretasan'];
+    }
     if (activeSection === 'aktivitas') {
       return ['Super Admin', 'Riwayat Aktivitas'];
     }
@@ -983,9 +1014,13 @@ export default function App() {
         pendingGraftCount={pendingGraftCount}
         accountsCount={accounts.length}
         publishedCount={publishedActiveCount}
+        securityAlertsCount={securityBlockedCount}
         mobileOpen={mobileMenuOpen}
         onCloseMobile={() => setMobileMenuOpen(false)}
-        onSelectSection={setActiveSection}
+        onSelectSection={(sec) => {
+          if (sec === 'keamanan') setSecurityEvents(loadSecurityEvents());
+          setActiveSection(sec);
+        }}
         onLogout={handleLogout}
       />
 
@@ -1113,6 +1148,20 @@ export default function App() {
               onDeleteAccount={handleDeleteAccount}
               onActivateSheetWebhook={handleActivateSheetWebhook}
               onRevokeSheetAccess={handleRevokeSheetAccess}
+            />
+          )}
+
+          {activeSection === 'keamanan' && (
+            <KeamananSiberView
+              accounts={accounts}
+              sheets={sheets}
+              clones={publishedClones}
+              securityEvents={securityEvents}
+              onRefreshEvents={() => setSecurityEvents(loadSecurityEvents())}
+              onClearEvents={() => {
+                clearSecurityEvents();
+                setSecurityEvents([]);
+              }}
             />
           )}
 

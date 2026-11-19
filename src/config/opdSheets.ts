@@ -35,14 +35,11 @@ export const PUBLISH_SHEET_CONFIG: PublishSheetConfig = {
 };
 
 /**
- * KREDENSIAL SUPER ADMIN WALIDATA KABUPATEN NAGEKEO
+ * IDENTITAS PUBLIK WALIDATA (Kredensial Super Admin diverifikasi ketat di server)
  */
-export const SUPER_ADMIN_CREDENTIALS = {
+export const SUPER_ADMIN_RESERVED_IDENTIFIERS = {
   username: 'superadmin',
   email: 'walidata@nagekeokab.go.id',
-  password: 'nagekeo2026',
-  namaLengkap: 'Super Admin Walidata',
-  namaOpd: 'Diskominfo Kabupaten Nagekeo',
 };
 
 /**

@@ -7,6 +7,7 @@ import {
   Globe,
   History,
   LogOut,
+  ShieldAlert,
   ShieldCheck,
   Users,
   X,
@@ -24,6 +25,7 @@ interface SidebarProps {
   pendingGraftCount: number;
   accountsCount: number;
   publishedCount: number;
+  securityAlertsCount: number;
   mobileOpen: boolean;
   onCloseMobile: () => void;
   onSelectSection: (section: ActiveNavSection) => void;
@@ -39,6 +41,7 @@ const NAV_ITEMS: {
   { id: 'data_masuk', label: 'Data Masuk (Read-Only)', icon: Database },
   { id: 'publikasi', label: 'Cloning & Publikasi', icon: Globe },
   { id: 'akun_sheet', label: 'Akun & Cangkok Sheet', icon: Users },
+  { id: 'keamanan', label: 'Keamanan Siber & AI', icon: ShieldAlert },
   { id: 'konfigurasi', label: 'Skrip Code.gs & Auth', icon: Code2 },
   { id: 'aktivitas', label: 'Riwayat Aktivitas', icon: History },
 ];
@@ -50,6 +53,7 @@ export function Sidebar({
   pendingGraftCount,
   accountsCount,
   publishedCount,
+  securityAlertsCount,
   mobileOpen,
   onCloseMobile,
   onSelectSection,
@@ -122,6 +126,10 @@ export function Sidebar({
                 {showPending ? (
                   <span className="font-mono tabular-nums text-xs font-semibold text-amber-300 shrink-0">
                     {pendingGraftCount}
+                  </span>
+                ) : item.id === 'keamanan' && securityAlertsCount > 0 ? (
+                  <span className="font-mono tabular-nums text-xs font-semibold text-red-400 shrink-0">
+                    {securityAlertsCount}
                   </span>
                 ) : item.id === 'publikasi' && publishedCount > 0 ? (
                   <span className="font-mono tabular-nums text-xs text-teal-300 shrink-0">
