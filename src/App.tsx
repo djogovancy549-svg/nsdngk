@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Menu, RefreshCw, X } from 'lucide-react';
 import { AktivitasView } from './components/AktivitasView';
 import { AkunOpdView } from './components/AkunOpdView';
@@ -22,6 +22,7 @@ import {
   updateOpdAccountStatus,
 } from './services/authSheetService';
 import {
+  appendSecurityEvent,
   clearSecurityEvents,
   inspectAndSanitizeValues,
   loadSecurityEvents,
@@ -101,6 +102,59 @@ export default function App() {
     () => loadSecurityEvents()
   );
   const [notice, setNotice] = useState<string | null>(null);
+  const lastInspectLogRef = useRef<number>(0);
+
+  // Proteksi anti klik-kanan & pintasan inspeksi (DevTools / View Source)
+  useEffect(() => {
+    const logBlockedInspect = (detail: string) => {
+      const now = Date.now();
+      if (now - lastInspectLogRef.current < 15000) return;
+      lastInspectLogRef.current = now;
+      appendSecurityEvent({
+        kategori: 'Inspeksi Diblokir',
+        tingkat: 'Rendah',
+        aktor: session?.username || 'Pengunjung',
+        target: 'Antarmuka Portal',
+        detail,
+        diblokir: true,
+      });
+      setSecurityEvents(loadSecurityEvents());
+    };
+
+    const handleContextMenu = (e: MouseEvent) => {
+      e.preventDefault();
+      logBlockedInspect(
+        'Upaya klik kanan (context menu) diblokir oleh proteksi keamanan portal.'
+      );
+    };
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const key = e.key.toLowerCase();
+      const isF12 = e.key === 'F12';
+      const isCtrlShiftInspect =
+        (e.ctrlKey || e.metaKey) &&
+        e.shiftKey &&
+        (key === 'i' || key === 'j' || key === 'c');
+      const isViewSource = (e.ctrlKey || e.metaKey) && key === 'u';
+      const isMacOptionInspect =
+        e.metaKey && e.altKey && (key === 'i' || key === 'j' || key === 'c' || key === 'u');
+
+      if (isF12 || isCtrlShiftInspect || isViewSource || isMacOptionInspect) {
+        e.preventDefault();
+        e.stopPropagation();
+        logBlockedInspect(
+          `Pintasan inspeksi (${e.key.toUpperCase()}) diblokir oleh proteksi keamanan portal.`
+        );
+      }
+    };
+
+    document.addEventListener('contextmenu', handleContextMenu, true);
+    document.addEventListener('keydown', handleKeyDown, true);
+    return () => {
+      document.removeEventListener('contextmenu', handleContextMenu, true);
+      document.removeEventListener('keydown', handleKeyDown, true);
+    };
+  }, [session?.username]);
 
   const pendingGraftCount = useMemo(
     () => sheets.filter((s) => s.status === 'Menunggu Cangkok Script').length,

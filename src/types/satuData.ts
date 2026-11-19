@@ -100,6 +100,7 @@ export interface SecurityEventEntry {
     | 'Login Gagal'
     | 'Injeksi Payload'
     | 'Kebocoran PII'
+    | 'Inspeksi Diblokir'
     | 'Audit AI';
   tingkat: SecuritySeverity;
   aktor: string;
