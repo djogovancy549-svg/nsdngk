@@ -124,6 +124,7 @@ export function OpdPortalWorkspace({
     undefined
   );
   const [formValues, setFormValues] = useState<Record<string, string>>({});
+  const [formModalOpen, setFormModalOpen] = useState(false);
   const [submittingRow, setSubmittingRow] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [confirmDeleteRowId, setConfirmDeleteRowId] = useState<string | null>(
@@ -238,7 +239,15 @@ export function OpdPortalWorkspace({
     setEditingRowId(row._id);
     setEditingRowNumber(row._rowNumber);
     setFormValues({ ...row.values });
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    setFormModalOpen(true);
+  };
+
+  const openNewRowModal = (sheet?: OpdDynamicSheet) => {
+    if (sheet) {
+      setSelectedSheetId(sheet.id);
+    }
+    resetDynamicForm();
+    setFormModalOpen(true);
   };
 
   const handleDynamicFormSubmit = async (e: React.FormEvent) => {
@@ -261,6 +270,7 @@ export function OpdPortalWorkspace({
     try {
       await onSubmitDynamicRow(currentSheet, row, Boolean(editingRowId));
       resetDynamicForm();
+      setFormModalOpen(false);
     } finally {
       setSubmittingRow(false);
     }
@@ -859,35 +869,63 @@ export function OpdPortalWorkspace({
               </div>
             ) : currentSheet ? (
               <>
-                {/* Dataset Selector Bar + Multi-Tab Workbook Strip */}
-                <div className="bg-white border border-slate-200 rounded-lg divide-y divide-slate-200">
-                  <div className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                    <div className="flex flex-col sm:flex-row sm:items-center gap-3 min-w-0">
-                      <label
-                        htmlFor="active-sheet-picker"
-                        className="text-xs font-medium text-slate-500 whitespace-nowrap"
-                      >
-                        Pilih Sheet Aktif:
-                      </label>
-                      <select
-                        id="active-sheet-picker"
-                        value={currentSheet.id}
-                        onChange={(e) => {
-                          setSelectedSheetId(e.target.value);
-                          resetDynamicForm();
-                        }}
-                        className="h-9 px-3 text-sm font-medium bg-white border border-slate-300 rounded-md text-slate-900 focus:outline-none focus:border-slate-900"
-                      >
-                        {activeSheets.map((s) => (
-                          <option key={s.id} value={s.id}>
-                            {s.judulDataset} [{s.sheetName}] ({s.headers.length}{' '}
-                            kolom)
-                          </option>
-                        ))}
-                      </select>
+                {/* Sheet Icon Grid + Workbook Controls */}
+                <section className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-xs">
+                  <div className="px-5 py-4 border-b border-slate-200 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+                    <div className="flex flex-wrap items-center gap-3 min-w-0">
+                      <div className="min-w-0">
+                        <p className="text-[11px] font-medium text-teal-700">
+                          Tampilan Ikon Sheet · {sameWorkbookSheets.length} tab
+                          aktif
+                        </p>
+                        <h2 className="text-base font-semibold text-slate-900 truncate">
+                          {currentSheet.judulDataset.split(' — ')[0]}
+                        </h2>
+                      </div>
+                      {activeSheets.length > sameWorkbookSheets.length && (
+                        <select
+                          aria-label="Pilih workbook aktif"
+                          value={currentSheet.id}
+                          onChange={(e) => {
+                            setSelectedSheetId(e.target.value);
+                            resetDynamicForm();
+                          }}
+                          className="h-8 px-2.5 text-xs font-medium bg-slate-50 border border-slate-300 rounded-md text-slate-800 focus:outline-none focus:border-slate-900"
+                        >
+                          {activeSheets.map((s) => (
+                            <option key={s.id} value={s.id}>
+                              {s.judulDataset} [{s.sheetName}]
+                            </option>
+                          ))}
+                        </select>
+                      )}
                     </div>
 
                     <div className="flex flex-wrap items-center gap-2 shrink-0">
+                      <form
+                        onSubmit={(e) => {
+                          e.preventDefault();
+                          handleLoadWorkbookTab(newTabName);
+                        }}
+                        className="flex items-center gap-1.5"
+                      >
+                        <input
+                          type="text"
+                          value={newTabName}
+                          onChange={(e) => setNewTabName(e.target.value)}
+                          placeholder="Nama tab (mis. Sheet2)"
+                          className="h-9 w-44 px-2.5 text-xs font-mono bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
+                        />
+                        <button
+                          type="submit"
+                          disabled={loadingNewTab || !newTabName.trim()}
+                          className="inline-flex items-center gap-1 h-9 px-3 text-xs font-medium text-white bg-teal-700 rounded-md hover:bg-teal-800 disabled:opacity-50 whitespace-nowrap"
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                          {loadingNewTab ? 'Memuat...' : 'Muat Tab'}
+                        </button>
+                      </form>
+
                       <button
                         type="button"
                         disabled={syncingSheetId === currentSheet.id}
@@ -901,8 +939,9 @@ export function OpdPortalWorkspace({
                               : ''
                           }`}
                         />
-                        Sinkron Tab, Header &amp; Data
+                        Sinkron
                       </button>
+
                       <a
                         href={currentSheet.sheetUrl}
                         target="_blank"
@@ -910,342 +949,162 @@ export function OpdPortalWorkspace({
                         className="inline-flex items-center gap-1.5 h-9 px-3 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-md hover:bg-slate-50 whitespace-nowrap"
                       >
                         <ExternalLink className="w-3.5 h-3.5" />
-                        Buka Google Sheet
+                        Sheet
                       </a>
                     </div>
                   </div>
 
-                  {/* Multi-tab switcher for the same registered Google Spreadsheet */}
-                  <div className="px-4 py-3 bg-slate-50/70 flex flex-col md:flex-row md:items-center justify-between gap-3">
-                    <div className="flex flex-wrap items-center gap-1.5 min-w-0">
-                      <span className="text-[11px] font-medium text-slate-500 mr-1 whitespace-nowrap">
-                        Tab dalam Workbook ini:
-                      </span>
-                      {sameWorkbookSheets.map((tabSheet) => {
-                        const isCurrent = tabSheet.id === currentSheet.id;
-                        return (
-                          <div
-                            key={tabSheet.id}
-                            className={`inline-flex items-center rounded-md border transition-colors whitespace-nowrap ${
-                              isCurrent
-                                ? 'bg-[#0B1B2B] text-white border-[#0B1B2B]'
-                                : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
-                            }`}
-                          >
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setSelectedSheetId(tabSheet.id);
-                                resetDynamicForm();
-                              }}
-                              className="pl-2.5 pr-1.5 py-1 text-xs font-mono"
+                  {/* Icon Cards for Sheets in This Workbook */}
+                  <div className="p-5 bg-slate-50/60 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3.5">
+                    {sameWorkbookSheets.map((tabSheet) => {
+                      const isCurrent = tabSheet.id === currentSheet.id;
+                      const tabRowCount = rowsBySheet[tabSheet.id]?.length ?? 0;
+
+                      return (
+                        <div
+                          key={tabSheet.id}
+                          onClick={() => {
+                            setSelectedSheetId(tabSheet.id);
+                            resetDynamicForm();
+                          }}
+                          role="button"
+                          tabIndex={0}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault();
+                              setSelectedSheetId(tabSheet.id);
+                              resetDynamicForm();
+                            }
+                          }}
+                          className={`group relative rounded-xl border p-4 flex flex-col justify-between gap-3 cursor-pointer transition-all ${
+                            isCurrent
+                              ? 'bg-[#0B1B2B] text-white border-[#0B1B2B] shadow-md'
+                              : 'bg-white text-slate-900 border-slate-200 hover:border-teal-600/50 hover:shadow-xs'
+                          }`}
+                        >
+                          {/* Top Row: Sheet Icon + Protected Delete */}
+                          <div className="flex items-start justify-between gap-2">
+                            <div
+                              className={`w-11 h-11 rounded-lg flex items-center justify-center shrink-0 ${
+                                isCurrent
+                                  ? 'bg-teal-500/20 text-teal-300'
+                                  : 'bg-emerald-50 text-emerald-700'
+                              }`}
                             >
-                              {tabSheet.sheetName} ({tabSheet.headers.length})
-                            </button>
+                              <FileSpreadsheet className="w-6 h-6" />
+                            </div>
                             <button
                               type="button"
-                              onClick={() =>
-                                requestProtectedSheetDelete(tabSheet)
-                              }
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                requestProtectedSheetDelete(tabSheet);
+                              }}
                               title={`Hapus tab ${tabSheet.sheetName}${
                                 pinEnabled ? ' (Dilindungi PIN)' : ''
                               }`}
                               aria-label={`Hapus tab ${tabSheet.sheetName}`}
-                              className={`pr-2 pl-1 py-1 rounded-r-md transition-colors ${
+                              className={`p-1 rounded-md transition-colors ${
                                 isCurrent
-                                  ? 'text-slate-400 hover:text-red-300'
-                                  : 'text-slate-400 hover:text-red-600'
+                                  ? 'text-slate-400 hover:text-red-300 hover:bg-white/10'
+                                  : 'text-slate-400 hover:text-red-600 hover:bg-red-50'
                               }`}
                             >
-                              <X className="w-3 h-3" />
+                              <X className="w-3.5 h-3.5" />
                             </button>
                           </div>
-                        );
-                      })}
-                      {unopenedDiscoveredTabs.map((tabName) => (
-                        <button
-                          key={tabName}
-                          type="button"
-                          disabled={loadingNewTab}
-                          onClick={() => handleLoadWorkbookTab(tabName)}
-                          className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-mono rounded-md border border-dashed border-teal-600 text-teal-800 bg-teal-50 hover:bg-teal-100 whitespace-nowrap"
-                        >
-                          <Plus className="w-3 h-3" />
-                          {tabName}
-                        </button>
-                      ))}
-                    </div>
 
-                    <form
-                      onSubmit={(e) => {
-                        e.preventDefault();
-                        handleLoadWorkbookTab(newTabName);
-                      }}
-                      className="flex items-center gap-1.5 shrink-0"
-                    >
-                      <input
-                        type="text"
-                        value={newTabName}
-                        onChange={(e) => setNewTabName(e.target.value)}
-                        placeholder="Nama tab baru (mis. Sheet2)"
-                        className="h-8 w-44 px-2.5 text-xs font-mono bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
-                      />
-                      <button
-                        type="submit"
-                        disabled={loadingNewTab || !newTabName.trim()}
-                        className="inline-flex items-center gap-1 h-8 px-2.5 text-xs font-medium text-white bg-teal-700 rounded-md hover:bg-teal-800 disabled:opacity-50 whitespace-nowrap"
-                      >
-                        <Plus className="w-3.5 h-3.5" />
-                        {loadingNewTab ? 'Memuat...' : 'Muat Tab'}
-                      </button>
-                    </form>
-                  </div>
-                </div>
-
-                {/* Auto-Generated Dynamic Form from Row 1 Headers */}
-                <section className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-xs">
-                  {/* Refined Architectural Form Header */}
-                  <div className="bg-[#0B1B2B] text-white px-6 py-5 flex flex-col md:flex-row md:items-center justify-between gap-4">
-                    <div className="space-y-1 min-w-0">
-                      <div className="flex flex-wrap items-center gap-2 text-[11px] text-teal-300 font-medium">
-                        <span>Formulir Dinamis Otomatis</span>
-                        <span className="text-slate-500">·</span>
-                        <span className="font-mono text-slate-300">
-                          Tab: {currentSheet.sheetName}
-                        </span>
-                        <span className="text-slate-500">·</span>
-                        <span className="font-mono tabular-nums text-slate-300">
-                          {currentSheet.headers.length} kolom
-                        </span>
-                      </div>
-                      <h2 className="text-lg font-semibold tracking-tight text-white truncate">
-                        {editingRowId
-                          ? `Ubah Baris Data — ${currentSheet.judulDataset}`
-                          : `Input Data — ${currentSheet.judulDataset}`}
-                      </h2>
-                    </div>
-
-                    {currentSheet.headers.length > 0 && (() => {
-                      const filledCount = currentSheet.headers.filter(
-                        (h) => (formValues[h] ?? '').trim().length > 0
-                      ).length;
-                      const pct = Math.round(
-                        (filledCount / currentSheet.headers.length) * 100
-                      );
-                      return (
-                        <div className="w-full md:w-52 shrink-0 space-y-1.5">
-                          <div className="flex items-center justify-between text-[11px]">
-                            <span className="text-slate-300">
-                              Kelengkapan Isian
-                            </span>
-                            <span className="font-mono tabular-nums font-semibold text-teal-300">
-                              {filledCount}/{currentSheet.headers.length} ({pct}%)
-                            </span>
-                          </div>
-                          <div className="h-1.5 w-full bg-white/15 rounded-full overflow-hidden">
-                            <div
-                              className="h-full bg-teal-400 transition-all duration-300"
-                              style={{ width: `${pct}%` }}
-                            />
-                          </div>
-                        </div>
-                      );
-                    })()}
-                  </div>
-
-                  {currentSheet.headers.length === 0 ? (
-                    <div className="p-10 text-center text-xs text-slate-500">
-                      Header baris 1 pada Google Sheet belum terdeteksi. Klik{' '}
-                      <strong>Sinkron Tab, Header &amp; Data</strong> di atas
-                      setelah mengisi judul kolom pada baris 1 Google Sheet Anda.
-                    </div>
-                  ) : (
-                    <form
-                      onSubmit={handleDynamicFormSubmit}
-                      className="p-6 space-y-6 bg-slate-50/40"
-                    >
-                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                        {currentSheet.headers.map((header, idx) => {
-                          const lower = header.toLowerCase();
-                          const baseType = inferInputTypeFromHeader(header);
-                          const isPhone =
-                            lower.includes('hp') ||
-                            lower.includes('telp') ||
-                            lower.includes('wa') ||
-                            lower.includes('kontak');
-                          const isEmail =
-                            lower.includes('email') || lower.includes('surel');
-                          const isAddress =
-                            lower.includes('alamat') ||
-                            lower.includes('kecamatan') ||
-                            lower.includes('desa') ||
-                            lower.includes('lokasi');
-                          const isPerson =
-                            lower.includes('nama') ||
-                            lower.includes('kepala') ||
-                            lower.includes('petugas');
-                          const isLongText =
-                            lower.includes('keterangan') ||
-                            lower.includes('catatan') ||
-                            lower.includes('deskripsi') ||
-                            lower.includes('uraian');
-
-                          const resolvedType = isEmail
-                            ? 'email'
-                            : isPhone
-                            ? 'tel'
-                            : baseType;
-
-                          const FieldIcon =
-                            resolvedType === 'date'
-                              ? Calendar
-                              : resolvedType === 'number'
-                              ? Hash
-                              : isPhone
-                              ? Phone
-                              : isEmail
-                              ? Mail
-                              : isAddress
-                              ? MapPin
-                              : isPerson
-                              ? User
-                              : isLongText
-                              ? AlignLeft
-                              : Type;
-
-                          const val = formValues[header] ?? '';
-                          const isFilled = val.trim().length > 0;
-                          const fieldIndex = String(idx + 1).padStart(2, '0');
-
-                          return (
-                            <div
-                              key={header}
-                              className={`bg-white border rounded-lg p-3.5 transition-colors ${
-                                isLongText ? 'sm:col-span-2 lg:col-span-3' : ''
-                              } ${
-                                isFilled
-                                  ? 'border-teal-600/40'
-                                  : 'border-slate-200 hover:border-slate-300'
+                          {/* Middle: Tab Name & Counts */}
+                          <div className="min-w-0">
+                            <p
+                              className={`text-sm font-semibold truncate ${
+                                isCurrent ? 'text-white' : 'text-slate-900'
                               }`}
                             >
-                              <div className="flex items-center justify-between gap-2 mb-2">
-                                <label
-                                  htmlFor={`dyn-${header}`}
-                                  className="flex items-center gap-1.5 text-xs font-semibold text-slate-800"
-                                >
-                                  <span className="font-mono text-[10px] font-medium text-slate-400">
-                                    {fieldIndex}
-                                  </span>
-                                  <span>{header}</span>
-                                </label>
-                                {isFilled && (
-                                  <Check className="w-3.5 h-3.5 text-teal-600 shrink-0" />
-                                )}
-                              </div>
+                              {tabSheet.sheetName}
+                            </p>
+                            <p
+                              className={`text-[11px] font-mono tabular-nums mt-0.5 ${
+                                isCurrent ? 'text-slate-300' : 'text-slate-500'
+                              }`}
+                            >
+                              {tabSheet.headers.length} kolom · {tabRowCount}{' '}
+                              baris
+                            </p>
+                          </div>
 
-                              {isLongText ? (
-                                <textarea
-                                  id={`dyn-${header}`}
-                                  rows={2}
-                                  value={val}
-                                  onChange={(e) =>
-                                    setFormValues((prev) => ({
-                                      ...prev,
-                                      [header]: e.target.value,
-                                    }))
-                                  }
-                                  placeholder={`Tuliskan ${header}...`}
-                                  className="w-full px-3 py-2 text-sm text-slate-900 bg-slate-50/70 border border-slate-200 rounded-md focus:bg-white focus:outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-600/15 transition-all"
-                                  required
-                                />
-                              ) : (
-                                <div className="relative">
-                                  <FieldIcon className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-                                  <input
-                                    id={`dyn-${header}`}
-                                    type={resolvedType}
-                                    step={
-                                      resolvedType === 'number'
-                                        ? 'any'
-                                        : undefined
-                                    }
-                                    value={val}
-                                    onChange={(e) =>
-                                      setFormValues((prev) => ({
-                                        ...prev,
-                                        [header]: e.target.value,
-                                      }))
-                                    }
-                                    placeholder={`Masukkan ${header}`}
-                                    className={`w-full h-10 pl-9 pr-3 text-sm text-slate-900 bg-slate-50/70 border border-slate-200 rounded-md focus:bg-white focus:outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-600/15 transition-all ${
-                                      resolvedType === 'number' || isPhone
-                                        ? 'font-mono tabular-nums'
-                                        : ''
-                                    }`}
-                                    required
-                                  />
-                                </div>
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
-
-                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-4 border-t border-slate-200">
-                        <p className="text-xs text-slate-500">
-                          Data akan langsung ditambahkan sebagai baris baru pada
-                          tab{' '}
-                          <span className="font-mono text-slate-700">
-                            {currentSheet.sheetName}
-                          </span>{' '}
-                          di Google Sheet milik {session.namaOpd}.
-                        </p>
-
-                        <div className="flex items-center justify-end gap-2 shrink-0">
+                          {/* Footer: Open Modal Form Button */}
                           <button
                             type="button"
-                            onClick={resetDynamicForm}
-                            className="inline-flex items-center gap-1.5 px-3.5 h-10 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-md hover:bg-slate-50"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              openNewRowModal(tabSheet);
+                            }}
+                            className={`w-full inline-flex items-center justify-center gap-1.5 h-8 text-xs font-medium rounded-md transition-colors ${
+                              isCurrent
+                                ? 'bg-teal-600 text-white hover:bg-teal-500'
+                                : 'bg-slate-100 text-slate-800 hover:bg-[#0B1B2B] hover:text-white'
+                            }`}
                           >
-                            <RotateCcw className="w-3.5 h-3.5" />
-                            {editingRowId ? 'Batal Ubah' : 'Bersihkan'}
-                          </button>
-                          <button
-                            type="submit"
-                            disabled={submittingRow}
-                            className="inline-flex items-center gap-2 px-5 h-10 text-xs font-semibold text-white bg-teal-700 rounded-md hover:bg-teal-800 disabled:opacity-60 transition-colors"
-                          >
-                            <Send className="w-3.5 h-3.5" />
-                            {submittingRow
-                              ? 'Mengirim ke Google Sheet...'
-                              : editingRowId
-                              ? 'Simpan Perubahan Baris'
-                              : 'Kirim ke Google Sheet'}
+                            <Plus className="w-3.5 h-3.5" />
+                            Input Data
                           </button>
                         </div>
-                      </div>
-                    </form>
-                  )}
+                      );
+                    })}
+
+                    {unopenedDiscoveredTabs.map((tabName) => (
+                      <button
+                        key={tabName}
+                        type="button"
+                        disabled={loadingNewTab}
+                        onClick={() => handleLoadWorkbookTab(tabName)}
+                        className="rounded-xl border border-dashed border-teal-500/70 bg-teal-50/50 hover:bg-teal-50 p-4 flex flex-col items-center justify-center text-center gap-2 transition-colors min-h-[148px]"
+                      >
+                        <div className="w-10 h-10 rounded-lg bg-teal-100 text-teal-700 flex items-center justify-center">
+                          <Plus className="w-5 h-5" />
+                        </div>
+                        <div>
+                          <p className="text-xs font-semibold font-mono text-teal-900">
+                            {tabName}
+                          </p>
+                          <p className="text-[11px] text-teal-700 mt-0.5">
+                            Klik untuk muat tab
+                          </p>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
                 </section>
 
                 {/* Auto-Generated Dynamic Table */}
-                <section className="bg-white border border-slate-200 rounded-lg overflow-hidden">
+                <section className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-xs">
                   <div className="p-4 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                    <div className="relative flex-1 max-w-sm">
-                      <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-                      <input
-                        type="search"
-                        value={searchQuery}
-                        onChange={(e) => setSearchQuery(e.target.value)}
-                        placeholder="Cari di seluruh kolom..."
-                        className="w-full h-9 pl-9 pr-3 text-sm bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
-                      />
+                    <div className="flex flex-col sm:flex-row sm:items-center gap-3 flex-1 min-w-0">
+                      <div className="relative flex-1 max-w-sm">
+                        <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                        <input
+                          type="search"
+                          value={searchQuery}
+                          onChange={(e) => setSearchQuery(e.target.value)}
+                          placeholder={`Cari data pada ${currentSheet.sheetName}...`}
+                          className="w-full h-9 pl-9 pr-3 text-sm bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
+                        />
+                      </div>
+                      <span className="text-xs font-mono tabular-nums text-slate-500 whitespace-nowrap">
+                        Tab: <strong className="text-slate-800">{currentSheet.sheetName}</strong> ·{' '}
+                        {filteredRows.length} baris
+                      </span>
                     </div>
 
                     <div className="flex items-center gap-2 shrink-0">
-                      <span className="text-xs font-mono tabular-nums text-slate-500">
-                        {filteredRows.length} baris
-                      </span>
+                      <button
+                        type="button"
+                        onClick={() => openNewRowModal(currentSheet)}
+                        className="inline-flex items-center gap-1.5 h-9 px-3.5 text-xs font-semibold text-white bg-teal-700 rounded-md hover:bg-teal-800 whitespace-nowrap"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        Input Data Baru
+                      </button>
                       <button
                         type="button"
                         disabled={filteredRows.length === 0}
@@ -1256,10 +1115,10 @@ export function OpdPortalWorkspace({
                             `${currentSheet.opdId}-${currentSheet.sheetName}.csv`
                           )
                         }
-                        className="inline-flex items-center gap-1.5 h-9 px-3 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-md hover:bg-slate-50 disabled:opacity-50"
+                        className="inline-flex items-center gap-1.5 h-9 px-3 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-md hover:bg-slate-50 disabled:opacity-50 whitespace-nowrap"
                       >
                         <Download className="w-3.5 h-3.5" />
-                        Unduh CSV
+                        CSV
                       </button>
                     </div>
                   </div>
@@ -1387,6 +1246,282 @@ export function OpdPortalWorkspace({
           </div>
         )}
       </main>
+
+      {/* Modal 0: Formulir Input / Ubah Data Dinamis (Profesional) */}
+      {formModalOpen && currentSheet && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-5"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="dynamic-form-modal-title"
+        >
+          <div className="w-full max-w-3xl max-h-[90vh] bg-white border border-slate-200 rounded-2xl shadow-2xl overflow-hidden flex flex-col">
+            {/* Architectural Modal Header */}
+            <div className="bg-[#0B1B2B] text-white px-6 py-5 flex items-start justify-between gap-4 shrink-0">
+              <div className="flex items-start gap-3.5 min-w-0">
+                <div className="w-10 h-10 rounded-lg bg-teal-500/20 text-teal-300 flex items-center justify-center shrink-0 mt-0.5">
+                  <FileSpreadsheet className="w-5 h-5" />
+                </div>
+                <div className="min-w-0 space-y-1">
+                  <div className="flex flex-wrap items-center gap-2 text-[11px] text-teal-300 font-medium">
+                    <span>Formulir Dinamis Otomatis</span>
+                    <span className="text-slate-500">·</span>
+                    <span className="font-mono text-slate-300">
+                      Tab: {currentSheet.sheetName}
+                    </span>
+                    <span className="text-slate-500">·</span>
+                    <span className="font-mono tabular-nums text-slate-300">
+                      {currentSheet.headers.length} kolom
+                    </span>
+                  </div>
+                  <h2
+                    id="dynamic-form-modal-title"
+                    className="text-lg font-semibold tracking-tight text-white truncate"
+                  >
+                    {editingRowId
+                      ? `Ubah Baris Data — ${currentSheet.judulDataset}`
+                      : `Input Data Baru — ${currentSheet.judulDataset}`}
+                  </h2>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setFormModalOpen(false);
+                  resetDynamicForm();
+                }}
+                className="p-1.5 text-slate-400 hover:text-white hover:bg-white/10 rounded-md shrink-0"
+                aria-label="Tutup formulir"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Live Completion Strip */}
+            {currentSheet.headers.length > 0 && (() => {
+              const filledCount = currentSheet.headers.filter(
+                (h) => (formValues[h] ?? '').trim().length > 0
+              ).length;
+              const pct = Math.round(
+                (filledCount / currentSheet.headers.length) * 100
+              );
+              return (
+                <div className="px-6 py-2.5 bg-slate-900/95 border-t border-white/10 flex items-center justify-between gap-4 shrink-0">
+                  <span className="text-[11px] text-slate-300">
+                    Kelengkapan isian kolom otomatis
+                  </span>
+                  <div className="flex items-center gap-3 w-48 sm:w-64">
+                    <div className="h-1.5 flex-1 bg-white/15 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-teal-400 transition-all duration-300"
+                        style={{ width: `${pct}%` }}
+                      />
+                    </div>
+                    <span className="text-[11px] font-mono tabular-nums font-semibold text-teal-300 shrink-0">
+                      {filledCount}/{currentSheet.headers.length} ({pct}%)
+                    </span>
+                  </div>
+                </div>
+              );
+            })()}
+
+            {currentSheet.headers.length === 0 ? (
+              <div className="p-10 text-center space-y-3">
+                <p className="text-sm font-medium text-slate-900">
+                  Header baris 1 belum terdeteksi
+                </p>
+                <p className="text-xs text-slate-500 max-w-md mx-auto">
+                  Isi judul kolom pada baris 1 tab{' '}
+                  <strong className="font-mono">{currentSheet.sheetName}</strong>{' '}
+                  di Google Sheet Anda, lalu klik tombol <strong>Sinkron</strong>.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setFormModalOpen(false)}
+                  className="h-9 px-4 text-xs font-medium text-white bg-[#0B1B2B] rounded-md"
+                >
+                  Tutup
+                </button>
+              </div>
+            ) : (
+              <form
+                onSubmit={handleDynamicFormSubmit}
+                className="flex flex-col flex-1 min-h-0"
+              >
+                <div className="flex-1 overflow-y-auto p-6 bg-slate-50/70">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    {currentSheet.headers.map((header, idx) => {
+                      const lower = header.toLowerCase();
+                      const baseType = inferInputTypeFromHeader(header);
+                      const isPhone =
+                        lower.includes('hp') ||
+                        lower.includes('telp') ||
+                        lower.includes('wa') ||
+                        lower.includes('kontak');
+                      const isEmail =
+                        lower.includes('email') || lower.includes('surel');
+                      const isAddress =
+                        lower.includes('alamat') ||
+                        lower.includes('kecamatan') ||
+                        lower.includes('desa') ||
+                        lower.includes('lokasi');
+                      const isPerson =
+                        lower.includes('nama') ||
+                        lower.includes('kepala') ||
+                        lower.includes('petugas');
+                      const isLongText =
+                        lower.includes('keterangan') ||
+                        lower.includes('catatan') ||
+                        lower.includes('deskripsi') ||
+                        lower.includes('uraian');
+
+                      const resolvedType = isEmail
+                        ? 'email'
+                        : isPhone
+                        ? 'tel'
+                        : baseType;
+
+                      const FieldIcon =
+                        resolvedType === 'date'
+                          ? Calendar
+                          : resolvedType === 'number'
+                          ? Hash
+                          : isPhone
+                          ? Phone
+                          : isEmail
+                          ? Mail
+                          : isAddress
+                          ? MapPin
+                          : isPerson
+                          ? User
+                          : isLongText
+                          ? AlignLeft
+                          : Type;
+
+                      const val = formValues[header] ?? '';
+                      const isFilled = val.trim().length > 0;
+                      const fieldIndex = String(idx + 1).padStart(2, '0');
+
+                      return (
+                        <div
+                          key={header}
+                          className={`bg-white border rounded-xl p-4 transition-all ${
+                            isLongText ? 'sm:col-span-2' : ''
+                          } ${
+                            isFilled
+                              ? 'border-teal-600/45 shadow-2xs'
+                              : 'border-slate-200 hover:border-slate-300'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-2 mb-2">
+                            <label
+                              htmlFor={`modal-dyn-${header}`}
+                              className="flex items-center gap-2 text-xs font-semibold text-slate-800"
+                            >
+                              <span className="inline-flex items-center justify-center w-5 h-5 rounded bg-slate-100 font-mono text-[10px] font-semibold text-slate-500">
+                                {fieldIndex}
+                              </span>
+                              <span>{header}</span>
+                            </label>
+                            {isFilled && (
+                              <Check className="w-3.5 h-3.5 text-teal-600 shrink-0" />
+                            )}
+                          </div>
+
+                          {isLongText ? (
+                            <textarea
+                              id={`modal-dyn-${header}`}
+                              rows={3}
+                              value={val}
+                              onChange={(e) =>
+                                setFormValues((prev) => ({
+                                  ...prev,
+                                  [header]: e.target.value,
+                                }))
+                              }
+                              placeholder={`Tuliskan ${header}...`}
+                              className="w-full px-3 py-2 text-sm text-slate-900 bg-slate-50/70 border border-slate-200 rounded-lg focus:bg-white focus:outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-600/15 transition-all"
+                              required
+                            />
+                          ) : (
+                            <div className="relative">
+                              <FieldIcon className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                              <input
+                                id={`modal-dyn-${header}`}
+                                type={resolvedType}
+                                step={
+                                  resolvedType === 'number' ? 'any' : undefined
+                                }
+                                value={val}
+                                onChange={(e) =>
+                                  setFormValues((prev) => ({
+                                    ...prev,
+                                    [header]: e.target.value,
+                                  }))
+                                }
+                                placeholder={`Masukkan ${header}`}
+                                className={`w-full h-10 pl-9 pr-3 text-sm text-slate-900 bg-slate-50/70 border border-slate-200 rounded-lg focus:bg-white focus:outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-600/15 transition-all ${
+                                  resolvedType === 'number' || isPhone
+                                    ? 'font-mono tabular-nums'
+                                    : ''
+                                }`}
+                                required
+                              />
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="px-6 py-4 bg-white border-t border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shrink-0">
+                  <p className="text-xs text-slate-500">
+                    Tersimpan langsung ke tab{' '}
+                    <span className="font-mono text-slate-800">
+                      {currentSheet.sheetName}
+                    </span>{' '}
+                    milik {session.namaOpd}.
+                  </p>
+                  <div className="flex items-center justify-end gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={resetDynamicForm}
+                      className="inline-flex items-center gap-1.5 px-3.5 h-10 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-md hover:bg-slate-50"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                      Bersihkan
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setFormModalOpen(false);
+                        resetDynamicForm();
+                      }}
+                      className="px-3.5 h-10 text-xs font-medium text-slate-600 hover:text-slate-900"
+                    >
+                      Batal
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={submittingRow}
+                      className="inline-flex items-center gap-2 px-5 h-10 text-xs font-semibold text-white bg-teal-700 rounded-md hover:bg-teal-800 disabled:opacity-60 transition-colors"
+                    >
+                      <Send className="w-3.5 h-3.5" />
+                      {submittingRow
+                        ? 'Mengirim...'
+                        : editingRowId
+                        ? 'Simpan Perubahan'
+                        : 'Kirim ke Google Sheet'}
+                    </button>
+                  </div>
+                </div>
+              </form>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Modal 1: Pengaturan PIN Keamanan Hapus Milik OPD */}
       {pinModalOpen && (
