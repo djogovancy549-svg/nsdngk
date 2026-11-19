@@ -5,18 +5,22 @@ import {
   Clock,
   Copy,
   ExternalLink,
+  FileSpreadsheet,
   FolderOpen,
   Link2,
+  Plus,
   RefreshCw,
   Trash2,
   UserPlus,
   UserX,
+  X,
 } from 'lucide-react';
 import {
   APPS_SCRIPT_DYNAMIC_SHEET_TEMPLATE,
   OPD_DIRECTORY,
 } from '../config/opdSheets';
 import { getActiveAuthSheetConfig } from '../services/authSheetService';
+import { extractGoogleSheetId } from '../services/dynamicSheetService';
 import {
   AccountStatus,
   OpdAccount,
@@ -37,6 +41,18 @@ interface AkunOpdViewProps {
     password: string;
     driveFolderUrl: string;
   }) => Promise<{ ok: boolean; message: string }>;
+  onRegisterSheetForOpd: (input: {
+    accountId: string;
+    opdId: string;
+    namaOpd: string;
+    emailOpd: string;
+    driveFolderUrl: string;
+    judulDataset: string;
+    deskripsi: string;
+    sheetUrl: string;
+    sheetName: string;
+    webhookUrl: string;
+  }) => Promise<void>;
   onToggleStatus: (account: OpdAccount, status: AccountStatus) => Promise<void>;
   onDeleteAccount: (account: OpdAccount) => Promise<void>;
   onActivateSheetWebhook: (
@@ -53,6 +69,7 @@ export function AkunOpdView({
   syncingAccounts,
   onSyncAccounts,
   onRegisterAccount,
+  onRegisterSheetForOpd,
   onToggleStatus,
   onDeleteAccount,
   onActivateSheetWebhook,
@@ -79,6 +96,92 @@ export function AkunOpdView({
   const [headerDrafts, setHeaderDrafts] = useState<Record<string, string>>({});
   const [activatingId, setActivatingId] = useState<string | null>(null);
   const [copiedScript, setCopiedScript] = useState(false);
+
+  // Super Admin direct Sheet registration for any OPD
+  const [showAddSheetForm, setShowAddSheetForm] = useState(false);
+  const [targetOpdSelection, setTargetOpdSelection] = useState<string>(() =>
+    accounts.length > 0 ? `acc:${accounts[0].id}` : `dir:${OPD_DIRECTORY[0].id}`
+  );
+  const [adminSheetTitle, setAdminSheetTitle] = useState('');
+  const [adminSheetUrl, setAdminSheetUrl] = useState('');
+  const [adminSheetTab, setAdminSheetTab] = useState('Sheet1');
+  const [adminSheetWebhook, setAdminSheetWebhook] = useState('');
+  const [adminSheetDesc, setAdminSheetDesc] = useState('');
+  const [adminSheetError, setAdminSheetError] = useState<string | null>(null);
+  const [adminSheetBusy, setAdminSheetBusy] = useState(false);
+
+  const handleAdminAddSheetSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAdminSheetError(null);
+
+    if (!adminSheetTitle.trim() || !adminSheetUrl.trim()) {
+      setAdminSheetError('Judul dataset dan URL Google Sheet wajib diisi.');
+      return;
+    }
+
+    if (!extractGoogleSheetId(adminSheetUrl.trim())) {
+      setAdminSheetError(
+        'Format URL Google Sheet tidak valid. Contoh: https://docs.google.com/spreadsheets/d/ID_SHEET/edit'
+      );
+      return;
+    }
+
+    let accountId = '';
+    let opdId = '';
+    let namaOpd = '';
+    let emailOpd = '';
+    let driveFolderUrl = '';
+
+    if (targetOpdSelection.startsWith('acc:')) {
+      const accId = targetOpdSelection.slice(4);
+      const foundAcc = accounts.find((a) => a.id === accId);
+      if (foundAcc) {
+        accountId = foundAcc.id;
+        opdId = foundAcc.opdId;
+        namaOpd = foundAcc.namaOpd;
+        emailOpd = foundAcc.email;
+        driveFolderUrl = foundAcc.driveFolderUrl;
+      }
+    }
+
+    if (!opdId) {
+      const dirId = targetOpdSelection.startsWith('dir:')
+        ? targetOpdSelection.slice(4)
+        : OPD_DIRECTORY[0].id;
+      const foundDir =
+        OPD_DIRECTORY.find((d) => d.id === dirId) ?? OPD_DIRECTORY[0];
+      const matchingAcc = accounts.find((a) => a.opdId === foundDir.id);
+      accountId = matchingAcc?.id ?? `admin-${foundDir.id}`;
+      opdId = foundDir.id;
+      namaOpd = foundDir.nama;
+      emailOpd = matchingAcc?.email ?? '';
+      driveFolderUrl = matchingAcc?.driveFolderUrl ?? '';
+    }
+
+    setAdminSheetBusy(true);
+    try {
+      await onRegisterSheetForOpd({
+        accountId,
+        opdId,
+        namaOpd,
+        emailOpd,
+        driveFolderUrl,
+        judulDataset: adminSheetTitle.trim(),
+        deskripsi: adminSheetDesc.trim(),
+        sheetUrl: adminSheetUrl.trim(),
+        sheetName: adminSheetTab.trim() || 'Sheet1',
+        webhookUrl: adminSheetWebhook.trim(),
+      });
+      setAdminSheetTitle('');
+      setAdminSheetUrl('');
+      setAdminSheetTab('Sheet1');
+      setAdminSheetWebhook('');
+      setAdminSheetDesc('');
+      setShowAddSheetForm(false);
+    } finally {
+      setAdminSheetBusy(false);
+    }
+  };
 
   const handleCopyCodeGs = async () => {
     try {
@@ -223,7 +326,7 @@ export function AkunOpdView({
 
       {/* SECTION 1: PENCANGKOKAN CODE.GS PADA GOOGLE SHEET OPD */}
       <section className="bg-white border border-slate-200 rounded-lg overflow-hidden">
-        <div className="px-5 py-4 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+        <div className="px-5 py-4 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div>
             <h2 className="text-base font-semibold text-slate-900">
               Pencangkokan doPost (Code.gs) &amp; Hak Akses Web OPD
@@ -235,10 +338,191 @@ export function AkunOpdView({
               mengaktifkan hak akses web OPD.
             </p>
           </div>
-          <span className="font-mono tabular-nums text-xs text-slate-500 shrink-0">
-            {sheets.length} Sheet terdaftar
-          </span>
+          <div className="flex items-center gap-3 shrink-0">
+            <span className="font-mono tabular-nums text-xs text-slate-500">
+              {sheets.length} Sheet terdaftar
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                if (!showAddSheetForm && accounts.length > 0 && !targetOpdSelection.startsWith('acc:')) {
+                  setTargetOpdSelection(`acc:${accounts[0].id}`);
+                }
+                setAdminSheetError(null);
+                setShowAddSheetForm((v) => !v);
+              }}
+              className="inline-flex items-center gap-1.5 h-9 px-3.5 text-xs font-semibold text-white bg-teal-700 rounded-md hover:bg-teal-800 whitespace-nowrap"
+            >
+              {showAddSheetForm ? (
+                <>
+                  <X className="w-3.5 h-3.5" />
+                  Tutup Form
+                </>
+              ) : (
+                <>
+                  <Plus className="w-3.5 h-3.5" />
+                  Daftarkan Sheet Dinas
+                </>
+              )}
+            </button>
+          </div>
         </div>
+
+        {/* Form Super Admin: Daftarkan Google Sheet untuk Dinas / OPD mana saja */}
+        {showAddSheetForm && (
+          <form
+            onSubmit={handleAdminAddSheetSubmit}
+            className="p-5 bg-slate-50/80 border-b border-slate-200 space-y-4"
+          >
+            <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+              <FileSpreadsheet className="w-4 h-4 text-teal-700" />
+              Daftarkan Google Sheet untuk Dinas / OPD
+            </div>
+
+            {adminSheetError && (
+              <div className="p-3 text-xs text-red-700 bg-red-50 border border-red-200 rounded-md">
+                {adminSheetError}
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              <div>
+                <label
+                  htmlFor="admin-sheet-opd"
+                  className="block text-xs font-medium text-slate-700 mb-1.5"
+                >
+                  Pilih Dinas / Akun OPD Pemilik Sheet
+                </label>
+                <select
+                  id="admin-sheet-opd"
+                  value={targetOpdSelection}
+                  onChange={(e) => setTargetOpdSelection(e.target.value)}
+                  className="w-full h-10 px-3 text-sm bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
+                >
+                  {accounts.length > 0 && (
+                    <optgroup label="Akun OPD Terdaftar">
+                      {accounts.map((acc) => (
+                        <option key={acc.id} value={`acc:${acc.id}`}>
+                          {acc.namaOpd} (@{acc.username})
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
+                  <optgroup label="Direktori Dinas / OPD Nagekeo">
+                    {OPD_DIRECTORY.map((opd) => (
+                      <option key={opd.id} value={`dir:${opd.id}`}>
+                        {opd.nama}
+                      </option>
+                    ))}
+                  </optgroup>
+                </select>
+              </div>
+
+              <div>
+                <label
+                  htmlFor="admin-sheet-title"
+                  className="block text-xs font-medium text-slate-700 mb-1.5"
+                >
+                  Judul Dataset / Nama Workbook
+                </label>
+                <input
+                  id="admin-sheet-title"
+                  type="text"
+                  value={adminSheetTitle}
+                  onChange={(e) => setAdminSheetTitle(e.target.value)}
+                  placeholder="Contoh: Data Pendidikan Nagekeo 2026"
+                  className="w-full h-10 px-3 text-sm bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
+                  required
+                />
+              </div>
+
+              <div>
+                <label
+                  htmlFor="admin-sheet-tab"
+                  className="block text-xs font-medium text-slate-700 mb-1.5"
+                >
+                  Nama Tab Sheet
+                </label>
+                <input
+                  id="admin-sheet-tab"
+                  type="text"
+                  value={adminSheetTab}
+                  onChange={(e) => setAdminSheetTab(e.target.value)}
+                  placeholder="Sheet1"
+                  className="w-full h-10 px-3 text-sm font-mono bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label
+                  htmlFor="admin-sheet-url"
+                  className="block text-xs font-medium text-slate-700 mb-1.5"
+                >
+                  Link URL Google Sheet OPD
+                </label>
+                <input
+                  id="admin-sheet-url"
+                  type="url"
+                  value={adminSheetUrl}
+                  onChange={(e) => setAdminSheetUrl(e.target.value)}
+                  placeholder="https://docs.google.com/spreadsheets/d/.../edit"
+                  className="w-full h-10 px-3 text-sm bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
+                  required
+                />
+              </div>
+
+              <div>
+                <label
+                  htmlFor="admin-sheet-webhook"
+                  className="block text-xs font-medium text-slate-700 mb-1.5"
+                >
+                  URL Webhook Apps Script (/exec) — Opsional
+                </label>
+                <input
+                  id="admin-sheet-webhook"
+                  type="url"
+                  value={adminSheetWebhook}
+                  onChange={(e) => setAdminSheetWebhook(e.target.value)}
+                  placeholder="https://script.google.com/macros/s/.../exec"
+                  className="w-full h-10 px-3 text-xs font-mono bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
+                />
+              </div>
+            </div>
+
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-2">
+              <input
+                type="text"
+                value={adminSheetDesc}
+                onChange={(e) => setAdminSheetDesc(e.target.value)}
+                placeholder="Keterangan singkat (opsional)"
+                className="flex-1 h-9 px-3 text-xs bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
+              />
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setShowAddSheetForm(false)}
+                  className="h-9 px-3.5 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-md hover:bg-slate-50"
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  disabled={adminSheetBusy}
+                  className="inline-flex items-center gap-1.5 h-9 px-4 text-xs font-semibold text-white bg-[#0B1B2B] rounded-md hover:bg-slate-800 disabled:opacity-60 whitespace-nowrap"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  {adminSheetBusy
+                    ? 'Menyimpan...'
+                    : adminSheetWebhook.trim()
+                    ? 'Simpan & Aktifkan Akses Web'
+                    : 'Daftarkan Sheet OPD'}
+                </button>
+              </div>
+            </div>
+          </form>
+        )}
 
         {sheets.length === 0 ? (
           <div className="py-12 px-6 text-center">

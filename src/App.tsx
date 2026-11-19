@@ -658,6 +658,109 @@ export default function App() {
     setNotice(`Hak akses web untuk "${sheet.judulDataset}" dinonaktifkan.`);
   };
 
+  const handleAdminRegisterSheetForOpd = async (input: {
+    accountId: string;
+    opdId: string;
+    namaOpd: string;
+    emailOpd: string;
+    driveFolderUrl: string;
+    judulDataset: string;
+    deskripsi: string;
+    sheetUrl: string;
+    sheetName: string;
+    webhookUrl: string;
+  }) => {
+    const sheetId = extractGoogleSheetId(input.sheetUrl.trim());
+    const resolvedTabName = input.sheetName.trim() || 'Sheet1';
+    const cleanWebhook = input.webhookUrl.trim();
+
+    const existingActiveWorkbook = sheets.find(
+      (s) =>
+        s.sheetId === sheetId &&
+        s.opdId === input.opdId &&
+        s.status === 'Aktif' &&
+        Boolean(s.webhookUrl)
+    );
+
+    const effectiveWebhook =
+      cleanWebhook || existingActiveWorkbook?.webhookUrl || '';
+    const isNowActive = Boolean(
+      effectiveWebhook && effectiveWebhook.startsWith('https://script.google.com/')
+    );
+
+    const newSheet: OpdDynamicSheet = {
+      id: `sheet-${Date.now().toString(36)}`,
+      accountId: input.accountId,
+      opdId: input.opdId,
+      namaOpd: input.namaOpd,
+      emailOpd: input.emailOpd,
+      driveFolderUrl: input.driveFolderUrl,
+      judulDataset: input.judulDataset.trim(),
+      deskripsi: input.deskripsi.trim(),
+      sheetUrl: input.sheetUrl.trim(),
+      sheetId,
+      sheetName: resolvedTabName,
+      webhookUrl: effectiveWebhook,
+      headers: [],
+      availableTabs: existingActiveWorkbook?.availableTabs,
+      status: isNowActive ? 'Aktif' : 'Menunggu Cangkok Script',
+      didaftarkanPada: new Date().toISOString().slice(0, 10),
+      terakhirSinkron: null,
+    };
+
+    const synced = await fetchDynamicSheetData(newSheet);
+    if (synced.headers.length > 0) {
+      newSheet.headers = synced.headers;
+      newSheet.terakhirSinkron = synced.syncedAt;
+    }
+    if (synced.availableTabs) {
+      newSheet.availableTabs = synced.availableTabs;
+    }
+
+    let latestSnapshot: OpdDynamicSheet[] = [];
+    setSheets((prev) => {
+      const next = [newSheet, ...prev];
+      latestSnapshot = next;
+      saveRegisteredSheets(next);
+      return next;
+    });
+
+    if (synced.rows.length > 0) {
+      setRowsBySheet((prev) => ({
+        ...prev,
+        [newSheet.id]: synced.rows,
+      }));
+    }
+
+    const discoveredCount = isNowActive
+      ? await syncDiscoveredWorkbookTabs(
+          newSheet,
+          synced.availableTabs,
+          latestSnapshot.length > 0 ? latestSnapshot : sheets
+        )
+      : 0;
+
+    appendAuditLog(
+      isNowActive ? 'Cangkok Script' : 'Daftar Sheet',
+      newSheet.namaOpd,
+      `${newSheet.judulDataset} (${resolvedTabName})`,
+      isNowActive
+        ? `Super Admin mendaftarkan & mengaktifkan Sheet untuk ${newSheet.namaOpd} (${newSheet.headers.length} header kolom${
+            discoveredCount > 0 ? `, +${discoveredCount} tab tambahan` : ''
+          }).`
+        : `Super Admin mendaftarkan Sheet untuk ${newSheet.namaOpd} (${newSheet.headers.length} header terdeteksi).`,
+      synced.source !== 'local_cache'
+    );
+
+    setNotice(
+      isNowActive
+        ? `Sheet "${newSheet.judulDataset}" untuk ${newSheet.namaOpd} berhasil didaftarkan dan AKTIF (${newSheet.headers.length} kolom header${
+            discoveredCount > 0 ? `, +${discoveredCount} tab tambahan terbaca` : ''
+          }).`
+        : `Sheet "${newSheet.judulDataset}" untuk ${newSheet.namaOpd} berhasil didaftarkan. Tempel URL Webhook /exec untuk mengaktifkan hak akses web OPD.`
+    );
+  };
+
   // Dynamic Row CRUD (Executed ONLY by the owning OPD)
   const handleSubmitDynamicRow = async (
     sheet: OpdDynamicSheet,
@@ -1005,6 +1108,7 @@ export default function App() {
               syncingAccounts={syncingAccounts}
               onSyncAccounts={handleSyncAccounts}
               onRegisterAccount={handleRegisterAccount}
+              onRegisterSheetForOpd={handleAdminRegisterSheetForOpd}
               onToggleStatus={handleToggleAccountStatus}
               onDeleteAccount={handleDeleteAccount}
               onActivateSheetWebhook={handleActivateSheetWebhook}
