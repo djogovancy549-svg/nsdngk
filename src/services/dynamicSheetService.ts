@@ -120,6 +120,7 @@ function parseCsvMatrix(csvText: string): string[][] {
 export interface FetchDynamicSheetResult {
   headers: string[];
   rows: DynamicSheetRow[];
+  availableTabs?: string[];
   source: SyncSource;
   syncedAt: string;
   message: string;
@@ -154,6 +155,11 @@ export async function fetchDynamicSheetData(
           const headers = (json.headers as unknown[])
             .map((h) => String(h).trim())
             .filter(Boolean);
+          const availableTabs = Array.isArray(json.availableSheets)
+            ? (json.availableSheets as unknown[])
+                .map((t) => String(t).trim())
+                .filter(Boolean)
+            : undefined;
           const rawRows = Array.isArray(json.data) ? json.data : [];
           const rows: DynamicSheetRow[] = rawRows.map(
             (item: { _rowNumber?: number; values?: Record<string, unknown> }, idx: number) => {
@@ -174,9 +180,10 @@ export async function fetchDynamicSheetData(
           return {
             headers,
             rows,
+            availableTabs,
             source: 'webhook',
             syncedAt: now,
-            message: `Tersinkron langsung dari Webhook Sheet (${headers.length} kolom header, ${rows.length} baris).`,
+            message: `Tersinkron langsung dari Webhook Sheet "${sheet.sheetName}" (${headers.length} kolom header, ${rows.length} baris).`,
           };
         }
       }

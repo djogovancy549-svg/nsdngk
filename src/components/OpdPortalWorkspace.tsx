@@ -45,6 +45,10 @@ interface OpdPortalWorkspaceProps {
     sheetName: string;
     manualHeaders: string[];
   }) => Promise<void>;
+  onAddWorkbookTab: (
+    baseSheet: OpdDynamicSheet,
+    tabName: string
+  ) => Promise<OpdDynamicSheet | null>;
   onDeleteSheet: (sheet: OpdDynamicSheet) => void;
   onSyncSheet: (sheet: OpdDynamicSheet) => Promise<void>;
   onSubmitDynamicRow: (
@@ -68,6 +72,7 @@ export function OpdPortalWorkspace({
   notice,
   onDismissNotice,
   onRegisterSheet,
+  onAddWorkbookTab,
   onDeleteSheet,
   onSyncSheet,
   onSubmitDynamicRow,
@@ -106,11 +111,28 @@ export function OpdPortalWorkspace({
   const [confirmDeleteRowId, setConfirmDeleteRowId] = useState<string | null>(
     null
   );
+  const [newTabName, setNewTabName] = useState('');
+  const [loadingNewTab, setLoadingNewTab] = useState(false);
 
   const currentSheet =
     activeSheets.find((s) => s.id === selectedSheetId) ??
     activeSheets[0] ??
     null;
+
+  const sameWorkbookSheets = useMemo(() => {
+    if (!currentSheet) return [];
+    return activeSheets.filter((s) => s.sheetId === currentSheet.sheetId);
+  }, [activeSheets, currentSheet]);
+
+  const unopenedDiscoveredTabs = useMemo(() => {
+    if (!currentSheet?.availableTabs) return [];
+    const opened = new Set(
+      sameWorkbookSheets.map((s) => s.sheetName.trim().toLowerCase())
+    );
+    return currentSheet.availableTabs.filter(
+      (t) => t.trim() && !opened.has(t.trim().toLowerCase())
+    );
+  }, [currentSheet, sameWorkbookSheets]);
 
   const currentRows = currentSheet ? rowsBySheet[currentSheet.id] ?? [] : [];
 
@@ -207,6 +229,21 @@ export function OpdPortalWorkspace({
     setSelectedSheetId(sheet.id);
     resetDynamicForm();
     setActiveTab('form');
+  };
+
+  const handleLoadWorkbookTab = async (tabNameToLoad: string) => {
+    if (!currentSheet || !tabNameToLoad.trim()) return;
+    setLoadingNewTab(true);
+    try {
+      const opened = await onAddWorkbookTab(currentSheet, tabNameToLoad.trim());
+      if (opened) {
+        setSelectedSheetId(opened.id);
+        resetDynamicForm();
+        setNewTabName('');
+      }
+    } finally {
+      setLoadingNewTab(false);
+    }
   };
 
   return (
@@ -638,57 +675,125 @@ export function OpdPortalWorkspace({
               </div>
             ) : currentSheet ? (
               <>
-                {/* Dataset Selector Bar */}
-                <div className="bg-white border border-slate-200 rounded-lg p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                  <div className="flex flex-col sm:flex-row sm:items-center gap-3 min-w-0">
-                    <label
-                      htmlFor="active-sheet-picker"
-                      className="text-xs font-medium text-slate-500 whitespace-nowrap"
-                    >
-                      Pilih Sheet Aktif:
-                    </label>
-                    <select
-                      id="active-sheet-picker"
-                      value={currentSheet.id}
-                      onChange={(e) => {
-                        setSelectedSheetId(e.target.value);
-                        resetDynamicForm();
-                      }}
-                      className="h-9 px-3 text-sm font-medium bg-white border border-slate-300 rounded-md text-slate-900 focus:outline-none focus:border-slate-900"
-                    >
-                      {activeSheets.map((s) => (
-                        <option key={s.id} value={s.id}>
-                          {s.judulDataset} ({s.headers.length} kolom)
-                        </option>
-                      ))}
-                    </select>
+                {/* Dataset Selector Bar + Multi-Tab Workbook Strip */}
+                <div className="bg-white border border-slate-200 rounded-lg divide-y divide-slate-200">
+                  <div className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div className="flex flex-col sm:flex-row sm:items-center gap-3 min-w-0">
+                      <label
+                        htmlFor="active-sheet-picker"
+                        className="text-xs font-medium text-slate-500 whitespace-nowrap"
+                      >
+                        Pilih Sheet Aktif:
+                      </label>
+                      <select
+                        id="active-sheet-picker"
+                        value={currentSheet.id}
+                        onChange={(e) => {
+                          setSelectedSheetId(e.target.value);
+                          resetDynamicForm();
+                        }}
+                        className="h-9 px-3 text-sm font-medium bg-white border border-slate-300 rounded-md text-slate-900 focus:outline-none focus:border-slate-900"
+                      >
+                        {activeSheets.map((s) => (
+                          <option key={s.id} value={s.id}>
+                            {s.judulDataset} [{s.sheetName}] ({s.headers.length}{' '}
+                            kolom)
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2 shrink-0">
+                      <button
+                        type="button"
+                        disabled={syncingSheetId === currentSheet.id}
+                        onClick={() => onSyncSheet(currentSheet)}
+                        className="inline-flex items-center gap-1.5 h-9 px-3 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-md hover:bg-slate-50 whitespace-nowrap"
+                      >
+                        <RefreshCw
+                          className={`w-3.5 h-3.5 ${
+                            syncingSheetId === currentSheet.id
+                              ? 'animate-spin'
+                              : ''
+                          }`}
+                        />
+                        Sinkron Tab, Header &amp; Data
+                      </button>
+                      <a
+                        href={currentSheet.sheetUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1.5 h-9 px-3 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-md hover:bg-slate-50 whitespace-nowrap"
+                      >
+                        <ExternalLink className="w-3.5 h-3.5" />
+                        Buka Google Sheet
+                      </a>
+                    </div>
                   </div>
 
-                  <div className="flex flex-wrap items-center gap-2 shrink-0">
-                    <button
-                      type="button"
-                      disabled={syncingSheetId === currentSheet.id}
-                      onClick={() => onSyncSheet(currentSheet)}
-                      className="inline-flex items-center gap-1.5 h-9 px-3 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-md hover:bg-slate-50 whitespace-nowrap"
+                  {/* Multi-tab switcher for the same registered Google Spreadsheet */}
+                  <div className="px-4 py-3 bg-slate-50/70 flex flex-col md:flex-row md:items-center justify-between gap-3">
+                    <div className="flex flex-wrap items-center gap-1.5 min-w-0">
+                      <span className="text-[11px] font-medium text-slate-500 mr-1 whitespace-nowrap">
+                        Tab dalam Workbook ini:
+                      </span>
+                      {sameWorkbookSheets.map((tabSheet) => {
+                        const isCurrent = tabSheet.id === currentSheet.id;
+                        return (
+                          <button
+                            key={tabSheet.id}
+                            type="button"
+                            onClick={() => {
+                              setSelectedSheetId(tabSheet.id);
+                              resetDynamicForm();
+                            }}
+                            className={`px-2.5 py-1 text-xs font-mono rounded-md border transition-colors whitespace-nowrap ${
+                              isCurrent
+                                ? 'bg-[#0B1B2B] text-white border-[#0B1B2B]'
+                                : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
+                            }`}
+                          >
+                            {tabSheet.sheetName} ({tabSheet.headers.length})
+                          </button>
+                        );
+                      })}
+                      {unopenedDiscoveredTabs.map((tabName) => (
+                        <button
+                          key={tabName}
+                          type="button"
+                          disabled={loadingNewTab}
+                          onClick={() => handleLoadWorkbookTab(tabName)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-mono rounded-md border border-dashed border-teal-600 text-teal-800 bg-teal-50 hover:bg-teal-100 whitespace-nowrap"
+                        >
+                          <Plus className="w-3 h-3" />
+                          {tabName}
+                        </button>
+                      ))}
+                    </div>
+
+                    <form
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        handleLoadWorkbookTab(newTabName);
+                      }}
+                      className="flex items-center gap-1.5 shrink-0"
                     >
-                      <RefreshCw
-                        className={`w-3.5 h-3.5 ${
-                          syncingSheetId === currentSheet.id
-                            ? 'animate-spin'
-                            : ''
-                        }`}
+                      <input
+                        type="text"
+                        value={newTabName}
+                        onChange={(e) => setNewTabName(e.target.value)}
+                        placeholder="Nama tab baru (mis. Sheet2)"
+                        className="h-8 w-44 px-2.5 text-xs font-mono bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
                       />
-                      Sinkron Header &amp; Data
-                    </button>
-                    <a
-                      href={currentSheet.sheetUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1.5 h-9 px-3 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-md hover:bg-slate-50 whitespace-nowrap"
-                    >
-                      <ExternalLink className="w-3.5 h-3.5" />
-                      Buka Google Sheet
-                    </a>
+                      <button
+                        type="submit"
+                        disabled={loadingNewTab || !newTabName.trim()}
+                        className="inline-flex items-center gap-1 h-8 px-2.5 text-xs font-medium text-white bg-teal-700 rounded-md hover:bg-teal-800 disabled:opacity-50 whitespace-nowrap"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        {loadingNewTab ? 'Memuat...' : 'Muat Tab'}
+                      </button>
+                    </form>
                   </div>
                 </div>
 

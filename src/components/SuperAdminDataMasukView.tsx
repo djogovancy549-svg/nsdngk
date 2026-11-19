@@ -81,7 +81,8 @@ export function SuperAdminDataMasukView({
             >
               {sheets.map((s) => (
                 <option key={s.id} value={s.id}>
-                  {s.namaOpd} — {s.judulDataset} ({rowsBySheet[s.id]?.length ?? 0})
+                  {s.namaOpd} — {s.judulDataset} [{s.sheetName}] (
+                  {rowsBySheet[s.id]?.length ?? 0})
                 </option>
               ))}
             </select>

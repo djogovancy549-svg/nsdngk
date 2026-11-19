@@ -63,6 +63,7 @@ export interface OpdDynamicSheet {
   sheetName: string;
   webhookUrl: string;
   headers: string[];
+  availableTabs?: string[];
   status: SheetIntegrationStatus;
   didaftarkanPada: string;
   terakhirSinkron: string | null;

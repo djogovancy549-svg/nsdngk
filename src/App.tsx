@@ -208,6 +208,81 @@ export default function App() {
   };
 
   // Dynamic Sheet Registration (OPD) & Grafting (Super Admin)
+  const syncDiscoveredWorkbookTabs = useCallback(
+    async (
+      baseSheet: OpdDynamicSheet,
+      availableTabs: string[] | undefined,
+      currentSheetsSnapshot: OpdDynamicSheet[]
+    ): Promise<number> => {
+      if (!availableTabs || availableTabs.length === 0 || !baseSheet.sheetId) {
+        return 0;
+      }
+
+      const existingNames = new Set(
+        currentSheetsSnapshot
+          .filter(
+            (s) =>
+              s.sheetId === baseSheet.sheetId && s.opdId === baseSheet.opdId
+          )
+          .map((s) => s.sheetName.trim().toLowerCase())
+      );
+
+      const missingTabs = availableTabs.filter(
+        (t) => t.trim() && !existingNames.has(t.trim().toLowerCase())
+      );
+      if (missingTabs.length === 0) return 0;
+
+      const baseTitle = baseSheet.judulDataset.split(' — ')[0].trim();
+      const addedSheets: OpdDynamicSheet[] = [];
+      const addedRows: Record<string, DynamicSheetRow[]> = {};
+
+      for (const tabName of missingTabs) {
+        const draftTab: OpdDynamicSheet = {
+          id: `sheet-${Date.now().toString(36)}-${Math.random()
+            .toString(36)
+            .slice(2, 6)}`,
+          accountId: baseSheet.accountId,
+          opdId: baseSheet.opdId,
+          namaOpd: baseSheet.namaOpd,
+          emailOpd: baseSheet.emailOpd,
+          driveFolderUrl: baseSheet.driveFolderUrl,
+          judulDataset: `${baseTitle} — ${tabName}`,
+          deskripsi: baseSheet.deskripsi,
+          sheetUrl: baseSheet.sheetUrl,
+          sheetId: baseSheet.sheetId,
+          sheetName: tabName,
+          webhookUrl: baseSheet.webhookUrl,
+          headers: [],
+          availableTabs,
+          status: baseSheet.status,
+          didaftarkanPada: new Date().toISOString().slice(0, 10),
+          terakhirSinkron: null,
+        };
+
+        const tabSynced = await fetchDynamicSheetData(draftTab);
+        draftTab.headers = tabSynced.headers;
+        draftTab.terakhirSinkron = tabSynced.syncedAt;
+        addedSheets.push(draftTab);
+        addedRows[draftTab.id] = tabSynced.rows;
+      }
+
+      if (addedSheets.length > 0) {
+        setSheets((prev) => {
+          const next = [...prev, ...addedSheets];
+          saveRegisteredSheets(next);
+          return next;
+        });
+        setRowsBySheet((prev) => ({
+          ...prev,
+          ...addedRows,
+        }));
+      }
+
+      return addedSheets.length;
+    },
+    []
+  );
+
   const handleSyncSheet = useCallback(
     async (sheet: OpdDynamicSheet) => {
       setSyncingSheetId(sheet.id);
@@ -216,16 +291,30 @@ export default function App() {
         const resolvedHeaders =
           res.headers.length > 0 ? res.headers : sheet.headers;
 
+        let latestSnapshot: OpdDynamicSheet[] = [];
         setSheets((prev) => {
-          const next = prev.map((item) =>
-            item.id === sheet.id
-              ? {
-                  ...item,
-                  headers: resolvedHeaders,
-                  terakhirSinkron: res.syncedAt,
-                }
-              : item
-          );
+          const next = prev.map((item) => {
+            if (item.id === sheet.id) {
+              return {
+                ...item,
+                headers: resolvedHeaders,
+                availableTabs: res.availableTabs ?? item.availableTabs,
+                terakhirSinkron: res.syncedAt,
+              };
+            }
+            if (
+              res.availableTabs &&
+              item.sheetId === sheet.sheetId &&
+              item.opdId === sheet.opdId
+            ) {
+              return {
+                ...item,
+                availableTabs: res.availableTabs,
+              };
+            }
+            return item;
+          });
+          latestSnapshot = next;
           saveRegisteredSheets(next);
           return next;
         });
@@ -235,19 +324,118 @@ export default function App() {
           [sheet.id]: res.rows,
         }));
 
+        const discoveredCount = await syncDiscoveredWorkbookTabs(
+          {
+            ...sheet,
+            headers: resolvedHeaders,
+            availableTabs: res.availableTabs ?? sheet.availableTabs,
+          },
+          res.availableTabs,
+          latestSnapshot.length > 0 ? latestSnapshot : sheets
+        );
+
+        const finalMessage =
+          discoveredCount > 0
+            ? `${res.message} Terdeteksi ${discoveredCount} tab sheet baru dalam workbook yang sama dan formulirnya langsung diaktifkan.`
+            : res.message;
+
         appendAuditLog(
           'Sinkronisasi Sheet',
           sheet.namaOpd,
-          sheet.judulDataset,
-          res.message,
+          `${sheet.judulDataset} (${sheet.sheetName})`,
+          finalMessage,
           res.source !== 'local_cache'
         );
-        setNotice(res.message);
+        setNotice(finalMessage);
       } finally {
         setSyncingSheetId(null);
       }
     },
-    [appendAuditLog]
+    [appendAuditLog, sheets, syncDiscoveredWorkbookTabs]
+  );
+
+  const handleAddWorkbookTab = useCallback(
+    async (
+      baseSheet: OpdDynamicSheet,
+      rawTabName: string
+    ): Promise<OpdDynamicSheet | null> => {
+      const tabName = rawTabName.trim();
+      if (!tabName) return null;
+
+      const existing = sheets.find(
+        (s) =>
+          s.sheetId === baseSheet.sheetId &&
+          s.opdId === baseSheet.opdId &&
+          s.sheetName.trim().toLowerCase() === tabName.toLowerCase()
+      );
+      if (existing) {
+        await handleSyncSheet(existing);
+        return existing;
+      }
+
+      const baseTitle = baseSheet.judulDataset.split(' — ')[0].trim();
+      const newTabSheet: OpdDynamicSheet = {
+        id: `sheet-${Date.now().toString(36)}-${Math.random()
+          .toString(36)
+          .slice(2, 6)}`,
+        accountId: baseSheet.accountId,
+        opdId: baseSheet.opdId,
+        namaOpd: baseSheet.namaOpd,
+        emailOpd: baseSheet.emailOpd,
+        driveFolderUrl: baseSheet.driveFolderUrl,
+        judulDataset: `${baseTitle} — ${tabName}`,
+        deskripsi: baseSheet.deskripsi,
+        sheetUrl: baseSheet.sheetUrl,
+        sheetId: baseSheet.sheetId,
+        sheetName: tabName,
+        webhookUrl: baseSheet.webhookUrl,
+        headers: [],
+        availableTabs: Array.from(
+          new Set([...(baseSheet.availableTabs ?? [baseSheet.sheetName]), tabName])
+        ),
+        status: baseSheet.status,
+        didaftarkanPada: new Date().toISOString().slice(0, 10),
+        terakhirSinkron: null,
+      };
+
+      setSyncingSheetId(newTabSheet.id);
+      try {
+        const synced = await fetchDynamicSheetData(newTabSheet);
+        newTabSheet.headers = synced.headers;
+        newTabSheet.availableTabs = synced.availableTabs ?? newTabSheet.availableTabs;
+        newTabSheet.terakhirSinkron = synced.syncedAt;
+
+        setSheets((prev) => {
+          const next = [...prev, newTabSheet];
+          saveRegisteredSheets(next);
+          return next;
+        });
+
+        setRowsBySheet((prev) => ({
+          ...prev,
+          [newTabSheet.id]: synced.rows,
+        }));
+
+        appendAuditLog(
+          'Daftar Sheet',
+          newTabSheet.namaOpd,
+          `${newTabSheet.judulDataset} (${tabName})`,
+          `Membuka tab "${tabName}" dari workbook terdaftar (${newTabSheet.headers.length} header kolom terbaca).`,
+          synced.source !== 'local_cache'
+        );
+
+        setNotice(
+          newTabSheet.headers.length > 0
+            ? `Tab "${tabName}" berhasil dimuat dengan ${newTabSheet.headers.length} kolom header. Formulir & tabel otomatis terbentuk.`
+            : `Tab "${tabName}" ditambahkan, namun header baris 1 belum terbaca. Pastikan nama tab persis sama dengan di Google Sheet dan baris 1 sudah berisi nama kolom.`
+        );
+
+        return newTabSheet;
+      } finally {
+        setSyncingSheetId(null);
+      }
+    },
+    [appendAuditLog, handleSyncSheet, sheets]
   );
 
   const handleSyncAllSheets = useCallback(async () => {
@@ -278,6 +466,15 @@ export default function App() {
     if (!session || session.role !== 'opd') return;
 
     const sheetId = extractGoogleSheetId(input.sheetUrl);
+    const resolvedTabName = input.sheetName || 'Sheet1';
+    const existingActiveWorkbook = sheets.find(
+      (s) =>
+        s.sheetId === sheetId &&
+        (s.accountId === session.id || s.opdId === (session.opdId ?? session.id)) &&
+        s.status === 'Aktif' &&
+        Boolean(s.webhookUrl)
+    );
+
     const newSheet: OpdDynamicSheet = {
       id: `sheet-${Date.now().toString(36)}`,
       accountId: session.id,
@@ -289,19 +486,23 @@ export default function App() {
       deskripsi: input.deskripsi,
       sheetUrl: input.sheetUrl,
       sheetId,
-      sheetName: input.sheetName || 'Sheet1',
-      webhookUrl: '',
+      sheetName: resolvedTabName,
+      webhookUrl: existingActiveWorkbook?.webhookUrl ?? '',
       headers: input.manualHeaders,
-      status: 'Menunggu Cangkok Script',
+      availableTabs: existingActiveWorkbook?.availableTabs,
+      status: existingActiveWorkbook ? 'Aktif' : 'Menunggu Cangkok Script',
       didaftarkanPada: new Date().toISOString().slice(0, 10),
       terakhirSinkron: null,
     };
 
-    // Coba deteksi header otomatis dari Google Sheet publik (jika sudah dibagikan)
+    // Deteksi header otomatis (via Webhook warisan workbook aktif atau Google Sheet publik)
     const detected = await fetchDynamicSheetData(newSheet);
     if (detected.headers.length > 0) {
       newSheet.headers = detected.headers;
       newSheet.terakhirSinkron = detected.syncedAt;
+    }
+    if (detected.availableTabs) {
+      newSheet.availableTabs = detected.availableTabs;
     }
 
     setSheets((prev) => {
@@ -320,13 +521,17 @@ export default function App() {
     appendAuditLog(
       'Daftar Sheet',
       session.namaOpd,
-      newSheet.judulDataset,
-      `Mengajukan URL Sheet (${newSheet.headers.length} header terdeteksi). Menunggu pencangkokan Code.gs oleh Super Admin.`,
+      `${newSheet.judulDataset} (${resolvedTabName})`,
+      existingActiveWorkbook
+        ? `Tab "${resolvedTabName}" pada workbook terdaftar langsung AKTIF (${newSheet.headers.length} header terdeteksi) menggunakan Webhook Code.gs yang sudah terpasang.`
+        : `Mengajukan URL Sheet (${newSheet.headers.length} header terdeteksi). Menunggu pencangkokan Code.gs oleh Super Admin.`,
       detected.source !== 'local_cache'
     );
 
     setNotice(
-      `URL Google Sheet "${newSheet.judulDataset}" berhasil didaftarkan (${newSheet.headers.length} header terdeteksi). Menunggu Super Admin mencangkokkan Code.gs.`
+      existingActiveWorkbook
+        ? `Tab "${resolvedTabName}" pada workbook yang sudah terdaftar langsung AKTIF (${newSheet.headers.length} kolom header terdeteksi). Formulir & tabel siap digunakan.`
+        : `URL Google Sheet "${newSheet.judulDataset}" berhasil didaftarkan (${newSheet.headers.length} header terdeteksi). Menunggu Super Admin mencangkokkan Code.gs.`
     );
   };
 
@@ -359,11 +564,14 @@ export default function App() {
       ...updatedBase,
       headers:
         synced.headers.length > 0 ? synced.headers : updatedBase.headers,
+      availableTabs: synced.availableTabs ?? updatedBase.availableTabs,
       terakhirSinkron: synced.syncedAt,
     };
 
+    let latestSnapshot: OpdDynamicSheet[] = [];
     setSheets((prev) => {
       const next = prev.map((s) => (s.id === finalSheet.id ? finalSheet : s));
+      latestSnapshot = next;
       saveRegisteredSheets(next);
       return next;
     });
@@ -375,16 +583,26 @@ export default function App() {
       }));
     }
 
+    const discoveredCount = await syncDiscoveredWorkbookTabs(
+      finalSheet,
+      synced.availableTabs,
+      latestSnapshot.length > 0 ? latestSnapshot : sheets
+    );
+
     appendAuditLog(
       'Cangkok Script',
       finalSheet.namaOpd,
       finalSheet.judulDataset,
-      `Hak akses web OPD diaktifkan (${finalSheet.headers.length} header kolom).`,
+      `Hak akses web OPD diaktifkan (${finalSheet.headers.length} header kolom${
+        discoveredCount > 0 ? `, +${discoveredCount} tab tambahan otomatis terbaca` : ''
+      }).`,
       synced.source === 'webhook'
     );
 
     setNotice(
-      `Hak akses web untuk "${finalSheet.judulDataset}" (${finalSheet.namaOpd}) telah AKTIF dengan ${finalSheet.headers.length} kolom header dinamis.`
+      `Hak akses web untuk "${finalSheet.judulDataset}" (${finalSheet.namaOpd}) telah AKTIF dengan ${finalSheet.headers.length} kolom header dinamis${
+        discoveredCount > 0 ? ` serta ${discoveredCount} tab sheet tambahan yang otomatis terbaca` : ''
+      }.`
     );
   };
 
@@ -490,6 +708,7 @@ export default function App() {
         notice={notice}
         onDismissNotice={() => setNotice(null)}
         onRegisterSheet={handleRegisterOpdSheet}
+        onAddWorkbookTab={handleAddWorkbookTab}
         onDeleteSheet={handleDeleteOpdSheet}
         onSyncSheet={handleSyncSheet}
         onSubmitDynamicRow={handleSubmitDynamicRow}

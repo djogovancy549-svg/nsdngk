@@ -151,16 +151,19 @@ function readHeaders(sheet) {
 
 function doGet(e) {
   try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
     const action = (e && e.parameter && e.parameter.action) || 'list';
     const sheetName = (e && e.parameter && e.parameter.sheet) || '';
+    const availableSheets = ss.getSheets().map(function(s) { return s.getName(); });
     const sheet = getTargetSheet(sheetName);
     const headers = readHeaders(sheet);
 
-    if (action === 'ping' || action === 'schema') {
+    if (action === 'ping' || action === 'schema' || action === 'listSheets') {
       return jsonOut({
         ok: true,
-        spreadsheet: SpreadsheetApp.getActiveSpreadsheet().getName(),
+        spreadsheet: ss.getName(),
         sheet: sheet.getName(),
+        availableSheets: availableSheets,
         headers: headers,
         rows: Math.max(0, sheet.getLastRow() - 1)
       });
@@ -169,10 +172,17 @@ function doGet(e) {
     const lastRow = sheet.getLastRow();
     const lastCol = headers.length;
     if (lastRow <= 1 || lastCol === 0) {
-      return jsonOut({ ok: true, headers: headers, data: [] });
+      return jsonOut({
+        ok: true,
+        spreadsheet: ss.getName(),
+        sheet: sheet.getName(),
+        availableSheets: availableSheets,
+        headers: headers,
+        data: []
+      });
     }
 
-    const rawValues = sheet.getRange(2, 1, lastRow - 1, lastCol).getValues();
+    const rawValues = sheet.getRange(2, 1, lastRow - 1, lastCol).getDisplayValues();
     const rows = [];
 
     for (let i = 0; i < rawValues.length; i++) {
@@ -193,8 +203,9 @@ function doGet(e) {
 
     return jsonOut({
       ok: true,
-      spreadsheet: SpreadsheetApp.getActiveSpreadsheet().getName(),
+      spreadsheet: ss.getName(),
       sheet: sheet.getName(),
+      availableSheets: availableSheets,
       headers: headers,
       data: rows
     });
