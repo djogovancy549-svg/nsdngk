@@ -556,11 +556,31 @@ export default function App() {
 
   const handleDeleteOpdSheet = (sheet: OpdDynamicSheet) => {
     setSheets((prev) => {
-      const next = prev.filter((s) => s.id !== sheet.id);
+      const next = prev
+        .filter((s) => s.id !== sheet.id)
+        .map((s) =>
+          s.sheetId === sheet.sheetId && s.availableTabs
+            ? {
+                ...s,
+                availableTabs: s.availableTabs.filter(
+                  (t) =>
+                    t.trim().toLowerCase() !==
+                    sheet.sheetName.trim().toLowerCase()
+                ),
+              }
+            : s
+        );
       saveRegisteredSheets(next);
       return next;
     });
-    setNotice(`Pendaftaran Sheet "${sheet.judulDataset}" dihapus.`);
+    setRowsBySheet((prev) => {
+      const next = { ...prev };
+      delete next[sheet.id];
+      return next;
+    });
+    setNotice(
+      `Tab "${sheet.sheetName}" (${sheet.judulDataset}) berhasil dihapus dari daftar.`
+    );
   };
 
   const handleActivateSheetWebhook = async (

@@ -25,6 +25,7 @@ import {
   Trash2,
   Type,
   User,
+  X,
 } from 'lucide-react';
 import {
   exportDynamicRowsToCsv,
@@ -123,6 +124,9 @@ export function OpdPortalWorkspace({
   );
   const [newTabName, setNewTabName] = useState('');
   const [loadingNewTab, setLoadingNewTab] = useState(false);
+  const [confirmDeleteTabId, setConfirmDeleteTabId] = useState<string | null>(
+    null
+  );
 
   const currentSheet =
     activeSheets.find((s) => s.id === selectedSheetId) ??
@@ -749,22 +753,80 @@ export function OpdPortalWorkspace({
                       </span>
                       {sameWorkbookSheets.map((tabSheet) => {
                         const isCurrent = tabSheet.id === currentSheet.id;
+                        const isConfirmingDelete =
+                          confirmDeleteTabId === tabSheet.id;
+
+                        if (isConfirmingDelete) {
+                          return (
+                            <div
+                              key={tabSheet.id}
+                              className="inline-flex items-center gap-1 px-2 py-0.5 text-xs bg-red-50 border border-red-300 rounded-md whitespace-nowrap"
+                            >
+                              <span className="font-mono text-red-800">
+                                Hapus {tabSheet.sheetName}?
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (isCurrent) {
+                                    const fallback = activeSheets.find(
+                                      (s) => s.id !== tabSheet.id
+                                    );
+                                    setSelectedSheetId(fallback?.id ?? '');
+                                    resetDynamicForm();
+                                  }
+                                  onDeleteSheet(tabSheet);
+                                  setConfirmDeleteTabId(null);
+                                }}
+                                className="px-1.5 py-0.5 text-[11px] font-semibold text-white bg-red-600 rounded hover:bg-red-700"
+                              >
+                                Ya
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setConfirmDeleteTabId(null)}
+                                className="px-1.5 py-0.5 text-[11px] font-medium text-slate-600 bg-white border border-slate-300 rounded hover:bg-slate-50"
+                              >
+                                Batal
+                              </button>
+                            </div>
+                          );
+                        }
+
                         return (
-                          <button
+                          <div
                             key={tabSheet.id}
-                            type="button"
-                            onClick={() => {
-                              setSelectedSheetId(tabSheet.id);
-                              resetDynamicForm();
-                            }}
-                            className={`px-2.5 py-1 text-xs font-mono rounded-md border transition-colors whitespace-nowrap ${
+                            className={`inline-flex items-center rounded-md border transition-colors whitespace-nowrap ${
                               isCurrent
                                 ? 'bg-[#0B1B2B] text-white border-[#0B1B2B]'
                                 : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
                             }`}
                           >
-                            {tabSheet.sheetName} ({tabSheet.headers.length})
-                          </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSelectedSheetId(tabSheet.id);
+                                setConfirmDeleteTabId(null);
+                                resetDynamicForm();
+                              }}
+                              className="pl-2.5 pr-1.5 py-1 text-xs font-mono"
+                            >
+                              {tabSheet.sheetName} ({tabSheet.headers.length})
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setConfirmDeleteTabId(tabSheet.id)}
+                              title={`Hapus tab ${tabSheet.sheetName}`}
+                              aria-label={`Hapus tab ${tabSheet.sheetName}`}
+                              className={`pr-2 pl-1 py-1 rounded-r-md transition-colors ${
+                                isCurrent
+                                  ? 'text-slate-400 hover:text-red-300'
+                                  : 'text-slate-400 hover:text-red-600'
+                              }`}
+                            >
+                              <X className="w-3 h-3" />
+                            </button>
+                          </div>
                         );
                       })}
                       {unopenedDiscoveredTabs.map((tabName) => (
