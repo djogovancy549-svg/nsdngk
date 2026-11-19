@@ -114,7 +114,10 @@ async function startServer() {
       return res.status(200).json({ ok: false, isSuperAdminCandidate: false });
     }
 
-    if (timingSafeEqualStr(password, SERVER_SUPER_ADMIN_PASSWORD)) {
+    if (
+      timingSafeEqualStr(password, SERVER_SUPER_ADMIN_PASSWORD) ||
+      timingSafeEqualStr(password.trim(), SERVER_SUPER_ADMIN_PASSWORD)
+    ) {
       loginAttemptsByIp.delete(ip);
       return res.status(200).json({
         ok: true,

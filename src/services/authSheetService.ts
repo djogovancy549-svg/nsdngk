@@ -499,7 +499,8 @@ export async function authenticateUser(
     };
   }
 
-  // 1. Verifikasi Super Admin secara ketat di server (kredensial tersembunyi dari klien)
+  // 1. Verifikasi Super Admin di server (kredensial plaintext tidak pernah ada di klien)
+  let serverHandled = false;
   try {
     const serverRes = await fetch('/api/auth/superadmin', {
       method: 'POST',
@@ -507,54 +508,103 @@ export async function authenticateUser(
       body: JSON.stringify({ identifier: cleanId, password }),
     });
 
-    if (serverRes.status === 429) {
-      const data = await serverRes.json();
-      appendSecurityEvent({
-        kategori: 'Brute Force',
-        tingkat: 'Kritis',
-        aktor: cleanId || 'Anonim',
-        target: 'Autentikasi Super Admin',
-        detail:
-          data?.message ||
-          'Server memblokir upaya brute-force pada akun Super Admin.',
-        diblokir: true,
-      });
-      return {
-        ok: false,
-        message:
-          data?.message ||
-          'Terlalu banyak percobaan gagal. Akses dikunci oleh server.',
-      };
-    }
-
-    if (serverRes.ok || serverRes.status === 401) {
-      const data = await serverRes.json();
-      if (data.ok && data.session) {
-        resetLoginGuard();
-        return {
-          ok: true,
-          session: data.session as UserSession,
-        };
-      }
-      if (data.isSuperAdminCandidate) {
+    const contentType = serverRes.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      if (serverRes.status === 429) {
+        const data = await serverRes.json();
         appendSecurityEvent({
-          kategori: 'Login Gagal',
-          tingkat: 'Tinggi',
-          aktor: cleanId,
+          kategori: 'Brute Force',
+          tingkat: 'Kritis',
+          aktor: cleanId || 'Anonim',
           target: 'Autentikasi Super Admin',
           detail:
             data?.message ||
-            'Percobaan masuk Super Admin gagal dengan kata sandi salah.',
-          diblokir: false,
+            'Server memblokir upaya brute-force pada akun Super Admin.',
+          diblokir: true,
         });
         return {
           ok: false,
-          message: data?.message || 'Kredensial tidak sesuai.',
+          message:
+            data?.message ||
+            'Terlalu banyak percobaan gagal. Akses dikunci oleh server.',
         };
+      }
+
+      if (serverRes.ok || serverRes.status === 401) {
+        const data = await serverRes.json();
+        serverHandled = true;
+        if (data.ok && data.session) {
+          resetLoginGuard();
+          return {
+            ok: true,
+            session: data.session as UserSession,
+          };
+        }
+        if (data.isSuperAdminCandidate) {
+          appendSecurityEvent({
+            kategori: 'Login Gagal',
+            tingkat: 'Tinggi',
+            aktor: cleanId,
+            target: 'Autentikasi Super Admin',
+            detail:
+              data?.message ||
+              'Percobaan masuk Super Admin gagal dengan kata sandi salah.',
+            diblokir: false,
+          });
+          return {
+            ok: false,
+            message: data?.message || 'Kredensial tidak sesuai.',
+          };
+        }
       }
     }
   } catch {
-    // Jika server tidak merespons, lanjut cek akun OPD lokal
+    // Endpoint server tidak terjangkau (misal mode statis / restart)
+  }
+
+  // Fallback verifikasi hash SHA-256 (tanpa plaintext) jika endpoint /api/auth/superadmin tidak terjangkau
+  if (
+    !serverHandled &&
+    (cleanId === SUPER_ADMIN_RESERVED_IDENTIFIERS.username ||
+      cleanId === SUPER_ADMIN_RESERVED_IDENTIFIERS.email)
+  ) {
+    const SUPER_ADMIN_SHA256 =
+      '96a2c0e63ea4bf155d594b9ae9e69e8ed88bf6f3916fe96da1358fea81b6d7d8';
+    const rawHash = await hashPassword(password);
+    const trimmedHash = await hashPassword(password.trim());
+    if (rawHash === SUPER_ADMIN_SHA256 || trimmedHash === SUPER_ADMIN_SHA256) {
+      resetLoginGuard();
+      return {
+        ok: true,
+        session: {
+          id: 'super-admin',
+          role: 'super_admin',
+          username: SUPER_ADMIN_RESERVED_IDENTIFIERS.username,
+          email: SUPER_ADMIN_RESERVED_IDENTIFIERS.email,
+          namaLengkap: 'Super Admin Walidata',
+          opdId: null,
+          namaOpd: 'Diskominfo Kabupaten Nagekeo',
+        },
+      };
+    }
+
+    const fail = recordFailedLoginAttempt(cleanId);
+    appendSecurityEvent({
+      kategori: fail.locked ? 'Brute Force' : 'Login Gagal',
+      tingkat: fail.locked ? 'Kritis' : 'Tinggi',
+      aktor: cleanId,
+      target: 'Autentikasi Super Admin',
+      detail: fail.locked
+        ? 'Percobaan masuk Super Admin gagal 5 kali berturut-turut. Akses dikunci.'
+        : 'Percobaan masuk Super Admin gagal dengan kata sandi salah.',
+      diblokir: fail.locked,
+    });
+    return {
+      ok: false,
+      message: fail.locked
+        ? `Kata sandi salah 5 kali berturut-turut. Akses dikunci ${fail.remainingSec} detik.`
+        : `Kata sandi Super Admin tidak sesuai. Sisa percobaan: ${fail.remainingAttempts}.`,
+    };
   }
 
   // 2. Verifikasi Akun OPD
