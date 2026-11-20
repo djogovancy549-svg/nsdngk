@@ -49,6 +49,78 @@ export type SheetIntegrationStatus = 'Menunggu Cangkok Script' | 'Aktif';
  * Header kolom diambil langsung dari baris 1 Google Sheet milik OPD tersebut,
  * sehingga formulir dan tabel terbentuk otomatis sesuai kedaulatan data OPD.
  */
+export type MetadataFrequency =
+  | 'Harian'
+  | 'Mingguan'
+  | 'Bulanan'
+  | 'Triwulanan'
+  | 'Semesteran'
+  | 'Tahunan'
+  | 'Ad-Hoc';
+
+export type MetadataCoverage =
+  | 'Kabupaten'
+  | 'Kecamatan'
+  | 'Desa/Kelurahan'
+  | 'Fasilitas/Unit';
+
+export type MetadataAccessLevel =
+  | 'Terbuka (Publik)'
+  | 'Terbatas (Internal OPD)'
+  | 'Rahasia (PII Terproteksi)';
+
+export type MetadataCollectionMethod =
+  | 'Kompilasi Administrasi'
+  | 'Survei'
+  | 'Sensus'
+  | 'Pendataan Lapangan'
+  | 'Integrasi Sistem';
+
+export type MetadataValidationStatus =
+  | 'Belum Diverifikasi'
+  | 'Perlu Revisi'
+  | 'Terverifikasi Walidata';
+
+export type MetadataVariableDataType =
+  | 'Teks'
+  | 'Angka'
+  | 'Tanggal'
+  | 'Persentase'
+  | 'Kode Wilayah'
+  | 'Koordinat';
+
+export interface MetadataVariableItem {
+  namaKolom: string;
+  definisi: string;
+  tipeData: MetadataVariableDataType;
+  satuan: string;
+  wajibDiisi: boolean;
+}
+
+/**
+ * Metadata Statistik Sektoral (MS-Kegiatan & MS-Variabel — Standar Satu Data Indonesia / Perpres 39/2019).
+ */
+export interface DatasetMetadata {
+  sheetId: string;
+  kodeReferensi: string;
+  urusanPemerintahan: string;
+  produsenData: string;
+  walidata: string;
+  tahunData: string;
+  frekuensiPemutakhiran: MetadataFrequency;
+  cakupanWilayah: MetadataCoverage;
+  tingkatAkses: MetadataAccessLevel;
+  metodologiPengumpulan: MetadataCollectionMethod;
+  satuanPengukuran: string;
+  konsepDefinisi: string;
+  kontakPic: string;
+  statusValidasi: MetadataValidationStatus;
+  catatanWalidata: string;
+  variabel: MetadataVariableItem[];
+  diperbaruiPada: string;
+  diperbaruiOleh: string;
+}
+
 export interface OpdDynamicSheet {
   id: string;
   accountId: string;
@@ -84,6 +156,7 @@ export type SyncSource = 'webhook' | 'sheet_csv' | 'local_cache';
 export type ActiveNavSection =
   | 'ringkasan'
   | 'data_masuk'
+  | 'metadata'
   | 'publikasi'
   | 'akun_sheet'
   | 'keamanan'
@@ -133,6 +206,7 @@ export type AuditActionType =
   | 'Daftar Sheet'
   | 'Cangkok Script'
   | 'Sinkronisasi Sheet'
+  | 'Metadata Dataset'
   | 'Publikasi Data'
   | 'Keamanan Siber'
   | 'Input Data OPD'

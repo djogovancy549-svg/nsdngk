@@ -5,6 +5,7 @@ import { AkunOpdView } from './components/AkunOpdView';
 import { AuthGateView } from './components/AuthGateView';
 import { KeamananSiberView } from './components/KeamananSiberView';
 import { KonfigurasiView } from './components/KonfigurasiView';
+import { MetadataSektoralView } from './components/MetadataSektoralView';
 import { OpdPortalWorkspace } from './components/OpdPortalWorkspace';
 import { PublikasiKominfoView } from './components/PublikasiKominfoView';
 import { RingkasanView } from './components/RingkasanView';
@@ -48,6 +49,10 @@ import {
   updateCloneStatusOnKominfoSheet,
 } from './services/publishSheetService';
 import {
+  fetchAllDatasetMetadata,
+  loadCachedMetadataMap,
+} from './services/metadataService';
+import {
   fetchRegencyConfig,
   loadCachedRegencyConfig,
   logoutServerSession,
@@ -58,6 +63,7 @@ import {
   ActiveNavSection,
   AuditActionType,
   AuditLogEntry,
+  DatasetMetadata,
   DynamicSheetRow,
   OpdAccount,
   OpdDynamicSheet,
@@ -108,6 +114,19 @@ export default function App() {
   const [rowsBySheet, setRowsBySheet] = useState<
     Record<string, DynamicSheetRow[]>
   >(() => loadAllDynamicRows(loadRegisteredSheets()));
+  const [metadataBySheet, setMetadataBySheet] = useState<
+    Record<string, DatasetMetadata>
+  >(() => loadCachedMetadataMap());
+
+  useEffect(() => {
+    let active = true;
+    fetchAllDatasetMetadata().then((map) => {
+      if (active) setMetadataBySheet(map);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const [activeSection, setActiveSection] =
     useState<ActiveNavSection>('ringkasan');
@@ -986,7 +1005,19 @@ export default function App() {
     );
   }
 
-  // 2. Masuk sebagai OPD -> Portal Kedaulatan Data (Daftar Sheet + Form/Tabel Dinamis milik OPD sendiri)
+  const handleMetadataSaved = (sheetId: string, metadata: DatasetMetadata) => {
+    setMetadataBySheet((prev) => ({ ...prev, [sheetId]: metadata }));
+    const targetSheet = sheets.find((s) => s.id === sheetId);
+    appendAuditLog(
+      'Metadata Dataset',
+      targetSheet?.namaOpd || session.namaOpd,
+      targetSheet?.judulDataset || sheetId,
+      `Memperbarui metadata sektoral (status: ${metadata.statusValidasi}).`,
+      true
+    );
+  };
+
+  // 2. Masuk sebagai OPD -> Portal Kedaulatan Data (Daftar Sheet + Form/Tabel Dinamis + Metadata milik OPD sendiri)
   if (session.role === 'opd') {
     const ownSheets = sheets.filter(
       (s) => s.accountId === session.id || s.opdId === session.opdId
@@ -997,9 +1028,12 @@ export default function App() {
         accounts={accounts}
         ownSheets={ownSheets}
         rowsBySheet={rowsBySheet}
+        metadataBySheet={metadataBySheet}
+        defaultWalidata={regencyConfig.namaWalidata}
         syncingSheetId={syncingSheetId}
         notice={notice}
         onDismissNotice={() => setNotice(null)}
+        onMetadataSaved={handleMetadataSaved}
         onRegisterSheet={handleRegisterOpdSheet}
         onAddWorkbookTab={handleAddWorkbookTab}
         onDeleteSheet={handleDeleteOpdSheet}
@@ -1112,6 +1146,9 @@ export default function App() {
     }
     if (activeSection === 'data_masuk') {
       return ['Super Admin', 'Data Masuk OPD (Read-Only)'];
+    }
+    if (activeSection === 'metadata') {
+      return ['Super Admin', 'Metadata Statistik Sektoral'];
     }
     if (activeSection === 'publikasi') {
       return ['Super Admin', 'Cloning & Publikasi Kominfo'];
@@ -1284,6 +1321,17 @@ export default function App() {
               syncingSheetId={syncingSheetId}
               onSyncSheet={handleSyncSheet}
               onGoToAkunSheet={() => setActiveSection('akun_sheet')}
+            />
+          )}
+
+          {activeSection === 'metadata' && (
+            <MetadataSektoralView
+              role="super_admin"
+              actorEmail={session.email}
+              defaultWalidata={regencyConfig.namaWalidata}
+              sheets={sheets}
+              metadataBySheet={metadataBySheet}
+              onMetadataSaved={handleMetadataSaved}
             />
           )}
 

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import {
   BarChart3,
+  ClipboardList,
   Code2,
   Database,
   FileSpreadsheet,
@@ -40,6 +41,7 @@ const NAV_ITEMS: {
 }[] = [
   { id: 'ringkasan', label: 'Ringkasan Eksekutif', icon: BarChart3 },
   { id: 'data_masuk', label: 'Data Masuk (Read-Only)', icon: Database },
+  { id: 'metadata', label: 'Metadata Sektoral', icon: ClipboardList },
   { id: 'publikasi', label: 'Cloning & Publikasi', icon: Globe },
   { id: 'akun_sheet', label: 'Akun & Cangkok Sheet', icon: Users },
   { id: 'keamanan', label: 'Keamanan Siber & AI', icon: ShieldAlert },

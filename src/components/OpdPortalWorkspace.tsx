@@ -40,6 +40,7 @@ import {
   inferInputTypeFromHeader,
 } from '../services/dynamicSheetService';
 import {
+  DatasetMetadata,
   DynamicSheetRow,
   OpdAccount,
   OpdDynamicSheet,
@@ -47,6 +48,7 @@ import {
 } from '../types/satuData';
 import { AnalyticsBarDonutSection } from './AnalyticsBarDonutSection';
 import { HeroBannerSlider } from './HeroBannerSlider';
+import { MetadataSektoralView } from './MetadataSektoralView';
 import { RunningSummaryTicker } from './RunningSummaryTicker';
 
 interface OpdPortalWorkspaceProps {
@@ -54,9 +56,12 @@ interface OpdPortalWorkspaceProps {
   accounts: OpdAccount[];
   ownSheets: OpdDynamicSheet[];
   rowsBySheet: Record<string, DynamicSheetRow[]>;
+  metadataBySheet: Record<string, DatasetMetadata>;
+  defaultWalidata: string;
   syncingSheetId: string | null;
   notice: string | null;
   onDismissNotice: () => void;
+  onMetadataSaved: (sheetId: string, metadata: DatasetMetadata) => void;
   onRegisterSheet: (input: {
     judulDataset: string;
     deskripsi: string;
@@ -87,9 +92,12 @@ export function OpdPortalWorkspace({
   accounts,
   ownSheets,
   rowsBySheet,
+  metadataBySheet,
+  defaultWalidata,
   syncingSheetId,
   notice,
   onDismissNotice,
+  onMetadataSaved,
   onRegisterSheet,
   onAddWorkbookTab,
   onDeleteSheet,
@@ -103,7 +111,7 @@ export function OpdPortalWorkspace({
     [ownSheets]
   );
 
-  const [activeTab, setActiveTab] = useState<'sheets' | 'form'>(() =>
+  const [activeTab, setActiveTab] = useState<'sheets' | 'form' | 'metadata'>(() =>
     activeSheets.length > 0 ? 'form' : 'sheets'
   );
   const [selectedSheetId, setSelectedSheetId] = useState<string>(
@@ -484,6 +492,19 @@ export function OpdPortalWorkspace({
             >
               Form &amp; Tabel Dinamis ({activeSheets.length})
             </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeTab === 'metadata'}
+              onClick={() => setActiveTab('metadata')}
+              className={`px-3 py-1 text-xs font-medium rounded transition-colors whitespace-nowrap ${
+                activeTab === 'metadata'
+                  ? 'bg-white text-slate-900 shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              Metadata ({ownSheets.length})
+            </button>
           </div>
 
           <button
@@ -535,6 +556,17 @@ export function OpdPortalWorkspace({
           }`}
         >
           Form &amp; Tabel ({activeSheets.length})
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveTab('metadata')}
+          className={`flex-1 py-1.5 text-xs font-medium rounded-md ${
+            activeTab === 'metadata'
+              ? 'bg-[#0B1B2B] text-white'
+              : 'bg-slate-100 text-slate-700'
+          }`}
+        >
+          Metadata ({ownSheets.length})
         </button>
       </div>
 
@@ -1406,6 +1438,18 @@ export function OpdPortalWorkspace({
               </>
             ) : null}
           </div>
+        )}
+
+        {/* TAB 3: METADATA STATISTIK SEKTORAL OPD */}
+        {activeTab === 'metadata' && (
+          <MetadataSektoralView
+            role="opd"
+            actorEmail={session.email}
+            defaultWalidata={defaultWalidata}
+            sheets={ownSheets}
+            metadataBySheet={metadataBySheet}
+            onMetadataSaved={onMetadataSaved}
+          />
         )}
       </main>
 

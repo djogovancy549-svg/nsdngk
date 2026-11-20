@@ -1012,6 +1012,163 @@ async function startServer() {
     });
   });
 
+  // 1a-1b. Metadata Statistik Sektoral (MS-Kegiatan & MS-Variabel — Satu Data Indonesia)
+  const METADATA_FILE_PATH = path.resolve(
+    __dirname,
+    'data',
+    'dataset-metadata.json'
+  );
+
+  const loadServerMetadataMap = (): Record<string, Record<string, unknown>> => {
+    try {
+      if (fs.existsSync(METADATA_FILE_PATH)) {
+        const raw = fs.readFileSync(METADATA_FILE_PATH, 'utf8');
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          return parsed as Record<string, Record<string, unknown>>;
+        }
+      }
+    } catch {
+      // Abaikan jika file belum ada
+    }
+    return {};
+  };
+
+  const saveServerMetadataMap = (
+    map: Record<string, Record<string, unknown>>
+  ) => {
+    try {
+      const dir = path.dirname(METADATA_FILE_PATH);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      fs.writeFileSync(
+        METADATA_FILE_PATH,
+        JSON.stringify(map, null, 2),
+        'utf8'
+      );
+    } catch {
+      // Tetap simpan di memori jika filesystem read-only
+    }
+  };
+
+  let serverMetadataMap: Record<string, Record<string, unknown>> =
+    loadServerMetadataMap();
+
+  app.get('/api/metadata', (_req, res) => {
+    return res.json({
+      ok: true,
+      metadataBySheet: serverMetadataMap,
+    });
+  });
+
+  app.put('/api/metadata/:sheetId', (req, res) => {
+    const sheetId = String(req.params.sheetId || '').trim();
+    if (!sheetId) {
+      return res.status(400).json({
+        ok: false,
+        message: 'ID sheet dataset wajib diisi.',
+      });
+    }
+
+    const incoming = req.body?.metadata;
+    if (!incoming || typeof incoming !== 'object') {
+      return res.status(400).json({
+        ok: false,
+        message: 'Payload metadata tidak valid.',
+      });
+    }
+
+    // Periksa apakah pengubah adalah Super Admin agar hanya Super Admin yang bisa mengubah statusValidasi ke Terverifikasi Walidata
+    const cookies = parseCookies(req);
+    const cookieToken = cookies[SESSION_COOKIE_NAME];
+    const verifiedCookie = cookieToken
+      ? verifySignedSessionToken(cookieToken)
+      : null;
+    const headerSuperAdmin = normalizeEmail(req.headers['x-superadmin-email']);
+    const isSuperAdmin = Boolean(
+      (verifiedCookie &&
+        verifiedCookie.role === 'super_admin' &&
+        isAuthorizedSuperAdminEmail(verifiedCookie.email)) ||
+        isAuthorizedSuperAdminEmail(headerSuperAdmin)
+    );
+
+    const existing = serverMetadataMap[sheetId] || {};
+    const requestedStatus = String(
+      incoming.statusValidasi || existing.statusValidasi || 'Belum Diverifikasi'
+    );
+    const safeStatus = isSuperAdmin
+      ? requestedStatus
+      : String(existing.statusValidasi || 'Belum Diverifikasi');
+
+    const cleanedVariables = Array.isArray(incoming.variabel)
+      ? incoming.variabel.slice(0, 150).map((v: Record<string, unknown>) => ({
+          namaKolom: String(v?.namaKolom ?? '').trim().slice(0, 120),
+          definisi: String(v?.definisi ?? '').trim().slice(0, 500),
+          tipeData: String(v?.tipeData ?? 'Teks').trim().slice(0, 40),
+          satuan: String(v?.satuan ?? '').trim().slice(0, 60),
+          wajibDiisi: Boolean(v?.wajibDiisi),
+        }))
+      : [];
+
+    const savedRecord: Record<string, unknown> = {
+      sheetId,
+      kodeReferensi: String(incoming.kodeReferensi ?? '').trim().slice(0, 60),
+      urusanPemerintahan: String(incoming.urusanPemerintahan ?? '')
+        .trim()
+        .slice(0, 120),
+      produsenData: String(incoming.produsenData ?? '').trim().slice(0, 160),
+      walidata: String(incoming.walidata ?? activeRegencyConfig.namaWalidata)
+        .trim()
+        .slice(0, 160),
+      tahunData: String(incoming.tahunData ?? '').trim().slice(0, 40),
+      frekuensiPemutakhiran: String(
+        incoming.frekuensiPemutakhiran ?? 'Tahunan'
+      ).trim(),
+      cakupanWilayah: String(incoming.cakupanWilayah ?? 'Kabupaten').trim(),
+      tingkatAkses: String(
+        incoming.tingkatAkses ?? 'Terbuka (Publik)'
+      ).trim(),
+      metodologiPengumpulan: String(
+        incoming.metodologiPengumpulan ?? 'Kompilasi Administrasi'
+      ).trim(),
+      satuanPengukuran: String(incoming.satuanPengukuran ?? '')
+        .trim()
+        .slice(0, 80),
+      konsepDefinisi: String(incoming.konsepDefinisi ?? '')
+        .trim()
+        .slice(0, 1500),
+      kontakPic: String(incoming.kontakPic ?? '').trim().slice(0, 160),
+      statusValidasi: safeStatus,
+      catatanWalidata: isSuperAdmin
+        ? String(incoming.catatanWalidata ?? '').trim().slice(0, 800)
+        : String(existing.catatanWalidata ?? ''),
+      variabel: cleanedVariables,
+      diperbaruiPada: new Date().toISOString(),
+      diperbaruiOleh: String(
+        incoming.diperbaruiOleh ||
+          verifiedCookie?.email ||
+          headerSuperAdmin ||
+          req.headers['x-actor-email'] ||
+          ''
+      )
+        .trim()
+        .toLowerCase(),
+    };
+
+    serverMetadataMap = {
+      ...serverMetadataMap,
+      [sheetId]: savedRecord,
+    };
+    saveServerMetadataMap(serverMetadataMap);
+
+    return res.status(200).json({
+      ok: true,
+      metadata: savedRecord,
+      message: 'Metadata statistik sektoral berhasil disimpan.',
+    });
+  });
+
   // 1a-2. Konfigurasi White-Label Multi-Kabupaten (Kedaulatan Penuh Per-Kabupaten)
   app.get('/api/config/regency', (_req, res) => {
     return res.json({
