@@ -1247,40 +1247,42 @@ export function OpdPortalWorkspace({
         )}
       </main>
 
-      {/* Modal 0: Formulir Input / Ubah Data Dinamis (Profesional) */}
+      {/* Modal 0: Formulir Input / Ubah Data Dinamis (Desain Profesional Dua Panel) */}
       {formModalOpen && currentSheet && (
         <div
-          className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-5"
+          className="fixed inset-0 z-50 bg-slate-950/65 backdrop-blur-xs flex items-center justify-center p-3 sm:p-6"
           role="dialog"
           aria-modal="true"
           aria-labelledby="dynamic-form-modal-title"
         >
-          <div className="w-full max-w-3xl max-h-[90vh] bg-white border border-slate-200 rounded-2xl shadow-2xl overflow-hidden flex flex-col">
-            {/* Architectural Modal Header */}
-            <div className="bg-[#0B1B2B] text-white px-6 py-5 flex items-start justify-between gap-4 shrink-0">
-              <div className="flex items-start gap-3.5 min-w-0">
-                <div className="w-10 h-10 rounded-lg bg-teal-500/20 text-teal-300 flex items-center justify-center shrink-0 mt-0.5">
+          <div className="w-full max-w-5xl max-h-[92vh] bg-white border border-slate-200 rounded-xl shadow-2xl overflow-hidden flex flex-col">
+            {/* Executive Modal Top Bar */}
+            <div className="bg-[#0B1B2B] text-white px-6 sm:px-8 py-5 flex items-start justify-between gap-4 shrink-0 border-b border-white/10">
+              <div className="flex items-start gap-4 min-w-0">
+                <div className="w-11 h-11 rounded-lg bg-white/10 border border-white/15 text-teal-300 flex items-center justify-center shrink-0">
                   <FileSpreadsheet className="w-5 h-5" />
                 </div>
                 <div className="min-w-0 space-y-1">
-                  <div className="flex flex-wrap items-center gap-2 text-[11px] text-teal-300 font-medium">
-                    <span>Formulir Dinamis Otomatis</span>
-                    <span className="text-slate-500">·</span>
-                    <span className="font-mono text-slate-300">
-                      Tab: {currentSheet.sheetName}
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-slate-300">
+                    <span className="text-teal-300 font-medium">
+                      {editingRowId ? 'Mode Pembaruan Baris' : 'Entri Data Sektoral'}
                     </span>
-                    <span className="text-slate-500">·</span>
-                    <span className="font-mono tabular-nums text-slate-300">
-                      {currentSheet.headers.length} kolom
+                    <span aria-hidden="true" className="text-slate-500">
+                      ·
+                    </span>
+                    <span className="truncate">{session.namaOpd}</span>
+                    <span aria-hidden="true" className="text-slate-500">
+                      ·
+                    </span>
+                    <span className="font-mono text-slate-200">
+                      Tab {currentSheet.sheetName}
                     </span>
                   </div>
                   <h2
                     id="dynamic-form-modal-title"
-                    className="text-lg font-semibold tracking-tight text-white truncate"
+                    className="text-lg sm:text-xl font-semibold tracking-tight text-white truncate"
                   >
-                    {editingRowId
-                      ? `Ubah Baris Data — ${currentSheet.judulDataset}`
-                      : `Input Data Baru — ${currentSheet.judulDataset}`}
+                    {currentSheet.judulDataset}
                   </h2>
                 </div>
               </div>
@@ -1291,234 +1293,378 @@ export function OpdPortalWorkspace({
                   setFormModalOpen(false);
                   resetDynamicForm();
                 }}
-                className="p-1.5 text-slate-400 hover:text-white hover:bg-white/10 rounded-md shrink-0"
+                className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors shrink-0"
                 aria-label="Tutup formulir"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
-            {/* Live Completion Strip */}
-            {currentSheet.headers.length > 0 && (() => {
+            {currentSheet.headers.length === 0 ? (
+              <div className="p-12 text-center space-y-3">
+                <p className="text-sm font-semibold text-slate-900">
+                  Header baris 1 belum terdeteksi
+                </p>
+                <p className="text-xs text-slate-500 max-w-md mx-auto leading-relaxed">
+                  Isi judul kolom pada baris 1 tab{' '}
+                  <strong className="font-mono text-slate-800">
+                    {currentSheet.sheetName}
+                  </strong>{' '}
+                  di Google Sheet Anda, lalu klik tombol <strong>Sinkron</strong>.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setFormModalOpen(false)}
+                  className="h-10 px-5 text-xs font-semibold text-white bg-[#0B1B2B] rounded-lg hover:bg-slate-800"
+                >
+                  Tutup
+                </button>
+              </div>
+            ) : (() => {
               const filledCount = currentSheet.headers.filter(
                 (h) => (formValues[h] ?? '').trim().length > 0
               ).length;
               const pct = Math.round(
                 (filledCount / currentSheet.headers.length) * 100
               );
+
               return (
-                <div className="px-6 py-2.5 bg-slate-900/95 border-t border-white/10 flex items-center justify-between gap-4 shrink-0">
-                  <span className="text-[11px] text-slate-300">
-                    Kelengkapan isian kolom otomatis
-                  </span>
-                  <div className="flex items-center gap-3 w-48 sm:w-64">
-                    <div className="h-1.5 flex-1 bg-white/15 rounded-full overflow-hidden">
-                      <div
-                        className="h-full bg-teal-400 transition-all duration-300"
-                        style={{ width: `${pct}%` }}
-                      />
+                <form
+                  onSubmit={handleDynamicFormSubmit}
+                  className="flex flex-col flex-1 min-h-0"
+                >
+                  {/* Shared Datalist for Kabupaten Nagekeo Subdistricts */}
+                  <datalist id="nagekeo-kecamatan-list">
+                    <option value="Aesesa" />
+                    <option value="Aesesa Selatan" />
+                    <option value="Boawae" />
+                    <option value="Keo Tengah" />
+                    <option value="Mauponggo" />
+                    <option value="Nangaroro" />
+                    <option value="Wolowae" />
+                  </datalist>
+
+                  {/* Two-Pane Body: Left Clean Form Canvas + Right Live Sheet Preview */}
+                  <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-12 overflow-y-auto lg:overflow-hidden">
+                    {/* Left Pane: Airy Editorial Form Fields (No Cards Within Cards) */}
+                    <div className="lg:col-span-8 lg:overflow-y-auto px-6 sm:px-8 py-6 bg-white">
+                      <div className="pb-4 mb-6 border-b border-slate-200 flex items-center justify-between gap-4">
+                        <div>
+                          <h3 className="text-sm font-semibold text-slate-900">
+                            Isian Kolom Otomatis dari Header Sheet
+                          </h3>
+                          <p className="text-xs text-slate-500 mt-0.5">
+                            Lengkapi seluruh {currentSheet.headers.length} kolom
+                            di bawah ini sesuai struktur baris 1 Google Sheet
+                            OPD Anda.
+                          </p>
+                        </div>
+                        <span className="font-mono tabular-nums text-xs font-semibold text-teal-700 shrink-0">
+                          {filledCount}/{currentSheet.headers.length} terisi
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-5">
+                        {currentSheet.headers.map((header) => {
+                          const lower = header.toLowerCase();
+                          const baseType = inferInputTypeFromHeader(header);
+                          const isGender =
+                            lower.includes('jenis kelamin') ||
+                            lower === 'jk' ||
+                            lower.includes('gender');
+                          const isKecamatan = lower.includes('kecamatan');
+                          const isPhone =
+                            lower.includes('hp') ||
+                            lower.includes('telp') ||
+                            lower.includes('wa') ||
+                            lower.includes('kontak');
+                          const isEmail =
+                            lower.includes('email') || lower.includes('surel');
+                          const isAddress =
+                            lower.includes('alamat') ||
+                            lower.includes('desa') ||
+                            lower.includes('kelurahan') ||
+                            lower.includes('lokasi');
+                          const isPerson =
+                            lower.includes('nama') ||
+                            lower.includes('kepala') ||
+                            lower.includes('petugas');
+                          const isLongText =
+                            lower.includes('keterangan') ||
+                            lower.includes('catatan') ||
+                            lower.includes('deskripsi') ||
+                            lower.includes('uraian') ||
+                            lower === 'alamat' ||
+                            lower.includes('alamat lengkap');
+
+                          const resolvedType = isEmail
+                            ? 'email'
+                            : isPhone
+                            ? 'tel'
+                            : baseType;
+
+                          const typeHint = isGender
+                            ? 'Pilihan'
+                            : isKecamatan
+                            ? 'Wilayah Nagekeo'
+                            : resolvedType === 'date'
+                            ? 'Tanggal'
+                            : resolvedType === 'number'
+                            ? 'Angka'
+                            : isPhone
+                            ? 'Telepon'
+                            : isEmail
+                            ? 'Email'
+                            : isLongText
+                            ? 'Teks Panjang'
+                            : 'Teks';
+
+                          const FieldIcon =
+                            resolvedType === 'date'
+                              ? Calendar
+                              : resolvedType === 'number'
+                              ? Hash
+                              : isPhone
+                              ? Phone
+                              : isEmail
+                              ? Mail
+                              : isAddress || isKecamatan
+                              ? MapPin
+                              : isPerson || isGender
+                              ? User
+                              : isLongText
+                              ? AlignLeft
+                              : Type;
+
+                          const val = formValues[header] ?? '';
+                          const isFilled = val.trim().length > 0;
+
+                          return (
+                            <div
+                              key={header}
+                              className={isLongText ? 'sm:col-span-2' : ''}
+                            >
+                              <div className="flex items-baseline justify-between gap-2 mb-1.5">
+                                <label
+                                  htmlFor={`modal-dyn-${header}`}
+                                  className="text-xs font-semibold text-slate-800"
+                                >
+                                  {header}
+                                </label>
+                                <span className="text-[11px] text-slate-400">
+                                  {typeHint}
+                                </span>
+                              </div>
+
+                              {isGender ? (
+                                <div className="grid grid-cols-2 gap-2">
+                                  {['Laki-laki', 'Perempuan'].map((opt) => {
+                                    const selected =
+                                      val.toLowerCase() === opt.toLowerCase();
+                                    return (
+                                      <button
+                                        key={opt}
+                                        type="button"
+                                        onClick={() =>
+                                          setFormValues((prev) => ({
+                                            ...prev,
+                                            [header]: opt,
+                                          }))
+                                        }
+                                        className={`h-11 px-3 text-xs font-medium rounded-lg border transition-all ${
+                                          selected
+                                            ? 'bg-[#0B1B2B] text-white border-[#0B1B2B]'
+                                            : 'bg-white text-slate-700 border-slate-300 hover:border-slate-400'
+                                        }`}
+                                      >
+                                        {opt}
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                              ) : isLongText ? (
+                                <textarea
+                                  id={`modal-dyn-${header}`}
+                                  rows={3}
+                                  value={val}
+                                  onChange={(e) =>
+                                    setFormValues((prev) => ({
+                                      ...prev,
+                                      [header]: e.target.value,
+                                    }))
+                                  }
+                                  placeholder={`Tuliskan ${header.toLowerCase()} secara lengkap...`}
+                                  className="w-full px-3.5 py-2.5 text-sm text-slate-900 bg-white border border-slate-300 rounded-lg focus:outline-none focus:border-[#0B1B2B] focus:ring-2 focus:ring-teal-600/20 transition-all"
+                                  required
+                                />
+                              ) : (
+                                <div className="relative">
+                                  <FieldIcon
+                                    className={`w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none transition-colors ${
+                                      isFilled
+                                        ? 'text-teal-700'
+                                        : 'text-slate-400'
+                                    }`}
+                                  />
+                                  <input
+                                    id={`modal-dyn-${header}`}
+                                    type={resolvedType}
+                                    list={
+                                      isKecamatan
+                                        ? 'nagekeo-kecamatan-list'
+                                        : undefined
+                                    }
+                                    step={
+                                      resolvedType === 'number'
+                                        ? 'any'
+                                        : undefined
+                                    }
+                                    value={val}
+                                    onChange={(e) =>
+                                      setFormValues((prev) => ({
+                                        ...prev,
+                                        [header]: e.target.value,
+                                      }))
+                                    }
+                                    placeholder={
+                                      isKecamatan
+                                        ? 'Pilih atau ketik kecamatan di Nagekeo'
+                                        : `Masukkan ${header.toLowerCase()}`
+                                    }
+                                    className={`w-full h-11 pl-10 pr-9 text-sm text-slate-900 bg-white border rounded-lg focus:outline-none focus:border-[#0B1B2B] focus:ring-2 focus:ring-teal-600/20 transition-all ${
+                                      isFilled
+                                        ? 'border-slate-400'
+                                        : 'border-slate-300'
+                                    } ${
+                                      resolvedType === 'number' || isPhone
+                                        ? 'font-mono tabular-nums'
+                                        : ''
+                                    }`}
+                                    required
+                                  />
+                                  {isFilled && (
+                                    <Check className="w-4 h-4 text-teal-600 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
                     </div>
-                    <span className="text-[11px] font-mono tabular-nums font-semibold text-teal-300 shrink-0">
-                      {filledCount}/{currentSheet.headers.length} ({pct}%)
-                    </span>
+
+                    {/* Right Pane: Live Sheet-Row Ledger Preview */}
+                    <aside className="lg:col-span-4 lg:overflow-y-auto bg-slate-50 border-t lg:border-t-0 lg:border-l border-slate-200 px-6 py-6 flex flex-col justify-between gap-6">
+                      <div className="space-y-5">
+                        {/* Completion Progress */}
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between text-xs">
+                            <span className="font-semibold text-slate-800">
+                              Progres Kelengkapan
+                            </span>
+                            <span className="font-mono tabular-nums font-semibold text-teal-700">
+                              {pct}%
+                            </span>
+                          </div>
+                          <div className="h-1.5 w-full bg-slate-200 rounded-full overflow-hidden">
+                            <div
+                              className="h-full bg-teal-600 transition-all duration-300"
+                              style={{ width: `${pct}%` }}
+                            />
+                          </div>
+                        </div>
+
+                        {/* Live Preview Key-Value Ledger */}
+                        <div className="space-y-2">
+                          <p className="text-xs font-semibold text-slate-800">
+                            Pratinjau Baris Google Sheet
+                          </p>
+                          <dl className="divide-y divide-slate-200 border-t border-b border-slate-200">
+                            {currentSheet.headers.map((header) => {
+                              const v = (formValues[header] ?? '').trim();
+                              return (
+                                <div
+                                  key={header}
+                                  className="py-2.5 flex items-baseline justify-between gap-3 text-xs"
+                                >
+                                  <dt className="text-slate-500 shrink-0 max-w-[45%] truncate">
+                                    {header}
+                                  </dt>
+                                  <dd
+                                    className={`text-right truncate ${
+                                      v
+                                        ? 'font-medium text-slate-900'
+                                        : 'italic text-slate-400'
+                                    }`}
+                                  >
+                                    {v || 'Belum diisi'}
+                                  </dd>
+                                </div>
+                              );
+                            })}
+                          </dl>
+                        </div>
+                      </div>
+
+                      {/* Quiet Security & Sovereignty Assurance */}
+                      <div className="pt-4 border-t border-slate-200 flex items-start gap-2.5 text-[11px] text-slate-500 leading-relaxed">
+                        <Shield className="w-4 h-4 text-teal-700 shrink-0 mt-0.5" />
+                        <span>
+                          Isian otomatis disanitasi dari skrip XSS &amp; injeksi
+                          formula sebelum dikirim langsung ke Google Sheet milik{' '}
+                          <strong className="font-medium text-slate-700">
+                            {session.namaOpd}
+                          </strong>
+                          .
+                        </span>
+                      </div>
+                    </aside>
                   </div>
-                </div>
+
+                  {/* Sticky Action Footer */}
+                  <div className="px-6 sm:px-8 py-4 bg-white border-t border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shrink-0">
+                    <p className="text-xs text-slate-500">
+                      Tujuan sinkronisasi:{' '}
+                      <span className="font-mono text-slate-800">
+                        {currentSheet.sheetName}
+                      </span>
+                    </p>
+                    <div className="flex items-center justify-end gap-2.5 shrink-0">
+                      <button
+                        type="button"
+                        onClick={resetDynamicForm}
+                        className="inline-flex items-center gap-1.5 px-4 h-10 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 whitespace-nowrap"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" />
+                        Bersihkan
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setFormModalOpen(false);
+                          resetDynamicForm();
+                        }}
+                        className="px-4 h-10 text-xs font-medium text-slate-600 hover:text-slate-900 whitespace-nowrap"
+                      >
+                        Batal
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={submittingRow}
+                        className="inline-flex items-center gap-2 px-5 h-10 text-xs font-semibold text-white bg-[#0B1B2B] rounded-lg hover:bg-slate-800 disabled:opacity-60 transition-colors whitespace-nowrap"
+                      >
+                        <Send className="w-3.5 h-3.5 text-teal-400" />
+                        {submittingRow
+                          ? 'Menyimpan...'
+                          : editingRowId
+                          ? 'Simpan Perubahan'
+                          : 'Simpan ke Google Sheet'}
+                      </button>
+                    </div>
+                  </div>
+                </form>
               );
             })()}
-
-            {currentSheet.headers.length === 0 ? (
-              <div className="p-10 text-center space-y-3">
-                <p className="text-sm font-medium text-slate-900">
-                  Header baris 1 belum terdeteksi
-                </p>
-                <p className="text-xs text-slate-500 max-w-md mx-auto">
-                  Isi judul kolom pada baris 1 tab{' '}
-                  <strong className="font-mono">{currentSheet.sheetName}</strong>{' '}
-                  di Google Sheet Anda, lalu klik tombol <strong>Sinkron</strong>.
-                </p>
-                <button
-                  type="button"
-                  onClick={() => setFormModalOpen(false)}
-                  className="h-9 px-4 text-xs font-medium text-white bg-[#0B1B2B] rounded-md"
-                >
-                  Tutup
-                </button>
-              </div>
-            ) : (
-              <form
-                onSubmit={handleDynamicFormSubmit}
-                className="flex flex-col flex-1 min-h-0"
-              >
-                <div className="flex-1 overflow-y-auto p-6 bg-slate-50/70">
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    {currentSheet.headers.map((header, idx) => {
-                      const lower = header.toLowerCase();
-                      const baseType = inferInputTypeFromHeader(header);
-                      const isPhone =
-                        lower.includes('hp') ||
-                        lower.includes('telp') ||
-                        lower.includes('wa') ||
-                        lower.includes('kontak');
-                      const isEmail =
-                        lower.includes('email') || lower.includes('surel');
-                      const isAddress =
-                        lower.includes('alamat') ||
-                        lower.includes('kecamatan') ||
-                        lower.includes('desa') ||
-                        lower.includes('lokasi');
-                      const isPerson =
-                        lower.includes('nama') ||
-                        lower.includes('kepala') ||
-                        lower.includes('petugas');
-                      const isLongText =
-                        lower.includes('keterangan') ||
-                        lower.includes('catatan') ||
-                        lower.includes('deskripsi') ||
-                        lower.includes('uraian');
-
-                      const resolvedType = isEmail
-                        ? 'email'
-                        : isPhone
-                        ? 'tel'
-                        : baseType;
-
-                      const FieldIcon =
-                        resolvedType === 'date'
-                          ? Calendar
-                          : resolvedType === 'number'
-                          ? Hash
-                          : isPhone
-                          ? Phone
-                          : isEmail
-                          ? Mail
-                          : isAddress
-                          ? MapPin
-                          : isPerson
-                          ? User
-                          : isLongText
-                          ? AlignLeft
-                          : Type;
-
-                      const val = formValues[header] ?? '';
-                      const isFilled = val.trim().length > 0;
-                      const fieldIndex = String(idx + 1).padStart(2, '0');
-
-                      return (
-                        <div
-                          key={header}
-                          className={`bg-white border rounded-xl p-4 transition-all ${
-                            isLongText ? 'sm:col-span-2' : ''
-                          } ${
-                            isFilled
-                              ? 'border-teal-600/45 shadow-2xs'
-                              : 'border-slate-200 hover:border-slate-300'
-                          }`}
-                        >
-                          <div className="flex items-center justify-between gap-2 mb-2">
-                            <label
-                              htmlFor={`modal-dyn-${header}`}
-                              className="flex items-center gap-2 text-xs font-semibold text-slate-800"
-                            >
-                              <span className="inline-flex items-center justify-center w-5 h-5 rounded bg-slate-100 font-mono text-[10px] font-semibold text-slate-500">
-                                {fieldIndex}
-                              </span>
-                              <span>{header}</span>
-                            </label>
-                            {isFilled && (
-                              <Check className="w-3.5 h-3.5 text-teal-600 shrink-0" />
-                            )}
-                          </div>
-
-                          {isLongText ? (
-                            <textarea
-                              id={`modal-dyn-${header}`}
-                              rows={3}
-                              value={val}
-                              onChange={(e) =>
-                                setFormValues((prev) => ({
-                                  ...prev,
-                                  [header]: e.target.value,
-                                }))
-                              }
-                              placeholder={`Tuliskan ${header}...`}
-                              className="w-full px-3 py-2 text-sm text-slate-900 bg-slate-50/70 border border-slate-200 rounded-lg focus:bg-white focus:outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-600/15 transition-all"
-                              required
-                            />
-                          ) : (
-                            <div className="relative">
-                              <FieldIcon className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-                              <input
-                                id={`modal-dyn-${header}`}
-                                type={resolvedType}
-                                step={
-                                  resolvedType === 'number' ? 'any' : undefined
-                                }
-                                value={val}
-                                onChange={(e) =>
-                                  setFormValues((prev) => ({
-                                    ...prev,
-                                    [header]: e.target.value,
-                                  }))
-                                }
-                                placeholder={`Masukkan ${header}`}
-                                className={`w-full h-10 pl-9 pr-3 text-sm text-slate-900 bg-slate-50/70 border border-slate-200 rounded-lg focus:bg-white focus:outline-none focus:border-teal-700 focus:ring-2 focus:ring-teal-600/15 transition-all ${
-                                  resolvedType === 'number' || isPhone
-                                    ? 'font-mono tabular-nums'
-                                    : ''
-                                }`}
-                                required
-                              />
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                <div className="px-6 py-4 bg-white border-t border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shrink-0">
-                  <p className="text-xs text-slate-500">
-                    Tersimpan langsung ke tab{' '}
-                    <span className="font-mono text-slate-800">
-                      {currentSheet.sheetName}
-                    </span>{' '}
-                    milik {session.namaOpd}.
-                  </p>
-                  <div className="flex items-center justify-end gap-2 shrink-0">
-                    <button
-                      type="button"
-                      onClick={resetDynamicForm}
-                      className="inline-flex items-center gap-1.5 px-3.5 h-10 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-md hover:bg-slate-50"
-                    >
-                      <RotateCcw className="w-3.5 h-3.5" />
-                      Bersihkan
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setFormModalOpen(false);
-                        resetDynamicForm();
-                      }}
-                      className="px-3.5 h-10 text-xs font-medium text-slate-600 hover:text-slate-900"
-                    >
-                      Batal
-                    </button>
-                    <button
-                      type="submit"
-                      disabled={submittingRow}
-                      className="inline-flex items-center gap-2 px-5 h-10 text-xs font-semibold text-white bg-teal-700 rounded-md hover:bg-teal-800 disabled:opacity-60 transition-colors"
-                    >
-                      <Send className="w-3.5 h-3.5" />
-                      {submittingRow
-                        ? 'Mengirim...'
-                        : editingRowId
-                        ? 'Simpan Perubahan'
-                        : 'Kirim ke Google Sheet'}
-                    </button>
-                  </div>
-                </div>
-              </form>
-            )}
           </div>
         </div>
       )}
