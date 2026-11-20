@@ -1,7 +1,9 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Check,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   Clock,
   Copy,
   ExternalLink,
@@ -11,7 +13,9 @@ import {
   Mail,
   Plus,
   RefreshCw,
+  Search,
   ShieldCheck,
+  SlidersHorizontal,
   Trash2,
   UserPlus,
   UserX,
@@ -175,6 +179,35 @@ export function AkunOpdView({
   const [headerDrafts, setHeaderDrafts] = useState<Record<string, string>>({});
   const [activatingId, setActivatingId] = useState<string | null>(null);
   const [copiedScript, setCopiedScript] = useState(false);
+
+  // Tabular search, filter & inline editor state for OPD sheets
+  const [sheetSearch, setSheetSearch] = useState('');
+  const [sheetOpdFilter, setSheetOpdFilter] = useState('ALL');
+  const [sheetStatusFilter, setSheetStatusFilter] = useState<'ALL' | 'Aktif' | 'Pending'>('ALL');
+  const [expandedSheetId, setExpandedSheetId] = useState<string | null>(null);
+
+  const uniqueSheetOpds = useMemo(
+    () => Array.from(new Set(sheets.map((s) => s.namaOpd))).sort(),
+    [sheets]
+  );
+
+  const filteredSheets = useMemo(() => {
+    const q = sheetSearch.trim().toLowerCase();
+    return sheets.filter((s) => {
+      if (sheetOpdFilter !== 'ALL' && s.namaOpd !== sheetOpdFilter) {
+        return false;
+      }
+      if (sheetStatusFilter === 'Aktif' && s.status !== 'Aktif') return false;
+      if (sheetStatusFilter === 'Pending' && s.status === 'Aktif') return false;
+      if (!q) return true;
+      return (
+        s.judulDataset.toLowerCase().includes(q) ||
+        s.namaOpd.toLowerCase().includes(q) ||
+        s.sheetName.toLowerCase().includes(q) ||
+        s.emailOpd.toLowerCase().includes(q)
+      );
+    });
+  }, [sheets, sheetSearch, sheetOpdFilter, sheetStatusFilter]);
 
   // Super Admin direct Sheet registration for any OPD
   const [showAddSheetForm, setShowAddSheetForm] = useState(false);
@@ -735,137 +768,316 @@ export function AkunOpdView({
             </p>
           </div>
         ) : (
-          <div className="divide-y divide-slate-200">
-            {sheets.map((sheet) => {
-              const isActive = sheet.status === 'Aktif';
-              const draftWebhook =
-                webhookDrafts[sheet.id] ?? sheet.webhookUrl ?? '';
-              const draftHeaders =
-                headerDrafts[sheet.id] ?? sheet.headers.join(', ');
-              const isBusy = activatingId === sheet.id;
+          <div>
+            {/* Filter & Search Toolbar */}
+            <div className="px-5 py-3 bg-slate-50/70 border-b border-slate-200 flex flex-col md:flex-row md:items-center gap-2.5">
+              <div className="relative flex-1 min-w-0">
+                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  type="text"
+                  value={sheetSearch}
+                  onChange={(e) => setSheetSearch(e.target.value)}
+                  placeholder="Cari judul dataset, nama OPD, tab sheet, atau email..."
+                  className="w-full h-9 pl-8 pr-3 text-xs bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
+                />
+              </div>
 
-              return (
-                <div key={sheet.id} className="p-5 space-y-4">
-                  <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-4">
-                    <div className="space-y-1 min-w-0">
-                      <div className="flex flex-wrap items-center gap-2 text-xs">
-                        {isActive ? (
-                          <span className="inline-flex items-center gap-1 font-medium text-emerald-700">
-                            <CheckCircle2 className="w-3.5 h-3.5" />
-                            Hak Akses Web Aktif
-                          </span>
-                        ) : (
-                          <span className="inline-flex items-center gap-1 font-medium text-amber-700">
-                            <Clock className="w-3.5 h-3.5" />
-                            Menunggu Pencangkokan Code.gs
-                          </span>
-                        )}
-                        <span className="text-slate-300">·</span>
-                        <span className="font-medium text-slate-700">
-                          {sheet.namaOpd}
-                        </span>
-                        <span className="text-slate-300">·</span>
-                        <span className="text-slate-500">{sheet.emailOpd}</span>
-                      </div>
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                <select
+                  aria-label="Filter berdasarkan Dinas/OPD"
+                  value={sheetOpdFilter}
+                  onChange={(e) => setSheetOpdFilter(e.target.value)}
+                  className="h-9 px-2.5 text-xs bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900 max-w-[220px]"
+                >
+                  <option value="ALL">Semua OPD ({uniqueSheetOpds.length})</option>
+                  {uniqueSheetOpds.map((opd) => (
+                    <option key={opd} value={opd}>
+                      {opd}
+                    </option>
+                  ))}
+                </select>
 
-                      <h3 className="text-sm font-semibold text-slate-900">
-                        {sheet.judulDataset}{' '}
-                        <span className="font-mono font-normal text-xs text-slate-500">
-                          (Tab: {sheet.sheetName})
-                        </span>
-                      </h3>
-                    </div>
+                <select
+                  aria-label="Filter status akses"
+                  value={sheetStatusFilter}
+                  onChange={(e) =>
+                    setSheetStatusFilter(
+                      e.target.value as 'ALL' | 'Aktif' | 'Pending'
+                    )
+                  }
+                  className="h-9 px-2.5 text-xs bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
+                >
+                  <option value="ALL">Semua Status</option>
+                  <option value="Aktif">Hak Akses Aktif</option>
+                  <option value="Pending">Menunggu Cangkok</option>
+                </select>
 
-                    <div className="flex flex-wrap items-center gap-2 shrink-0">
-                      {sheet.driveFolderUrl && (
-                        <a
-                          href={sheet.driveFolderUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-md hover:bg-slate-50 whitespace-nowrap"
-                        >
-                          <FolderOpen className="w-3.5 h-3.5" />
-                          Folder Drive OPD
-                        </a>
-                      )}
-                      <a
-                        href={sheet.sheetUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-md hover:bg-slate-50 whitespace-nowrap"
-                      >
-                        <ExternalLink className="w-3.5 h-3.5" />
-                        Buka Sheet OPD
-                      </a>
-                      {isActive && (
-                        <button
-                          type="button"
-                          onClick={() => onRevokeSheetAccess(sheet)}
-                          className="px-2.5 py-1.5 text-xs font-medium text-slate-600 bg-white border border-slate-300 rounded-md hover:bg-slate-50 whitespace-nowrap"
-                        >
-                          Nonaktifkan Akses
-                        </button>
-                      )}
-                    </div>
-                  </div>
+                {(sheetSearch ||
+                  sheetOpdFilter !== 'ALL' ||
+                  sheetStatusFilter !== 'ALL') && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSheetSearch('');
+                      setSheetOpdFilter('ALL');
+                      setSheetStatusFilter('ALL');
+                    }}
+                    className="h-9 px-2.5 text-xs font-medium text-slate-600 hover:text-slate-900 bg-white border border-slate-300 rounded-md"
+                  >
+                    Reset
+                  </button>
+                )}
+              </div>
+            </div>
 
-                  {/* Grafting Input Row */}
-                  <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 pt-2">
-                    <div className="lg:col-span-5">
-                      <label className="block text-[11px] font-medium text-slate-600 mb-1">
-                        URL Webhook Web App hasil cangkok doPost (/exec)
-                      </label>
-                      <input
-                        type="url"
-                        value={draftWebhook}
-                        onChange={(e) =>
-                          setWebhookDrafts((prev) => ({
-                            ...prev,
-                            [sheet.id]: e.target.value,
-                          }))
-                        }
-                        placeholder="https://script.google.com/macros/s/.../exec"
-                        className="w-full h-9 px-3 text-xs font-mono bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
-                      />
-                    </div>
+            {filteredSheets.length === 0 ? (
+              <div className="py-10 px-6 text-center text-xs text-slate-500">
+                Tidak ada sheet yang cocok dengan filter pencarian Anda.
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="border-b border-slate-200 bg-slate-50 text-left text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                      <th className="py-2.5 pl-5 pr-2 w-10">#</th>
+                      <th className="py-2.5 px-3">Dataset &amp; Tab</th>
+                      <th className="py-2.5 px-3">Dinas / OPD</th>
+                      <th className="py-2.5 px-3">Status &amp; Kolom</th>
+                      <th className="py-2.5 px-3">Tautan</th>
+                      <th className="py-2.5 pl-3 pr-5 text-right">Aksi</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {filteredSheets.map((sheet, idx) => {
+                      const isActive = sheet.status === 'Aktif';
+                      const isExpanded = expandedSheetId === sheet.id;
+                      const draftWebhook =
+                        webhookDrafts[sheet.id] ?? sheet.webhookUrl ?? '';
+                      const draftHeaders =
+                        headerDrafts[sheet.id] ?? sheet.headers.join(', ');
+                      const isBusy = activatingId === sheet.id;
 
-                    <div className="lg:col-span-4">
-                      <label className="block text-[11px] font-medium text-slate-600 mb-1">
-                        Header Kolom Baris 1 (otomatis terdeteksi / bisa diedit)
-                      </label>
-                      <input
-                        type="text"
-                        value={draftHeaders}
-                        onChange={(e) =>
-                          setHeaderDrafts((prev) => ({
-                            ...prev,
-                            [sheet.id]: e.target.value,
-                          }))
-                        }
-                        placeholder="Kolom 1, Kolom 2, Kolom 3"
-                        className="w-full h-9 px-3 text-xs bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
-                      />
-                    </div>
+                      return (
+                        <React.Fragment key={sheet.id}>
+                          <tr
+                            className={`transition-colors ${
+                              isExpanded
+                                ? 'bg-teal-50/40'
+                                : 'hover:bg-slate-50/80'
+                            }`}
+                          >
+                            <td className="py-3 pl-5 pr-2 font-mono tabular-nums text-slate-400 align-middle">
+                              {idx + 1}
+                            </td>
+                            <td className="py-3 px-3 align-middle min-w-[200px]">
+                              <div className="font-semibold text-slate-900 leading-snug">
+                                {sheet.judulDataset}
+                              </div>
+                              <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-slate-500 font-mono">
+                                <span>Tab: {sheet.sheetName}</span>
+                                {sheet.webhookUrl && (
+                                  <>
+                                    <span className="text-slate-300">·</span>
+                                    <span className="text-teal-700 truncate max-w-[140px]">
+                                      /exec terpasang
+                                    </span>
+                                  </>
+                                )}
+                              </div>
+                            </td>
+                            <td className="py-3 px-3 align-middle min-w-[170px]">
+                              <div className="font-medium text-slate-800">
+                                {sheet.namaOpd}
+                              </div>
+                              <div className="text-[11px] text-slate-500 truncate max-w-[200px]">
+                                {sheet.emailOpd || '—'}
+                              </div>
+                            </td>
+                            <td className="py-3 px-3 align-middle whitespace-nowrap">
+                              {isActive ? (
+                                <span className="inline-flex items-center gap-1 font-medium text-emerald-700">
+                                  <CheckCircle2 className="w-3.5 h-3.5" />
+                                  Aktif
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 font-medium text-amber-700">
+                                  <Clock className="w-3.5 h-3.5" />
+                                  Menunggu
+                                </span>
+                              )}
+                              <div className="text-[11px] text-slate-500 font-mono tabular-nums mt-0.5">
+                                {sheet.headers.length} kolom header
+                              </div>
+                            </td>
+                            <td className="py-3 px-3 align-middle whitespace-nowrap">
+                              <div className="inline-flex items-center gap-1.5">
+                                {sheet.driveFolderUrl && (
+                                  <a
+                                    href={sheet.driveFolderUrl}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    title="Buka Folder Drive OPD"
+                                    className="inline-flex items-center gap-1 h-7 px-2 text-[11px] font-medium text-slate-700 bg-white border border-slate-300 rounded hover:bg-slate-50"
+                                  >
+                                    <FolderOpen className="w-3 h-3" />
+                                    Drive
+                                  </a>
+                                )}
+                                <a
+                                  href={sheet.sheetUrl}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  title="Buka Google Sheet OPD"
+                                  className="inline-flex items-center gap-1 h-7 px-2 text-[11px] font-medium text-slate-700 bg-white border border-slate-300 rounded hover:bg-slate-50"
+                                >
+                                  <ExternalLink className="w-3 h-3" />
+                                  Sheet
+                                </a>
+                              </div>
+                            </td>
+                            <td className="py-3 pl-3 pr-5 text-right align-middle whitespace-nowrap">
+                              <div className="inline-flex items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setExpandedSheetId(
+                                      isExpanded ? null : sheet.id
+                                    )
+                                  }
+                                  className={`inline-flex items-center gap-1 h-7 px-2.5 text-[11px] font-semibold rounded border transition-colors ${
+                                    isExpanded
+                                      ? 'bg-[#0B1B2B] text-white border-[#0B1B2B]'
+                                      : isActive
+                                      ? 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
+                                      : 'bg-teal-700 text-white border-teal-700 hover:bg-teal-800'
+                                  }`}
+                                >
+                                  <SlidersHorizontal className="w-3 h-3" />
+                                  {isActive ? 'Atur' : 'Cangkok'}
+                                  {isExpanded ? (
+                                    <ChevronUp className="w-3 h-3" />
+                                  ) : (
+                                    <ChevronDown className="w-3 h-3" />
+                                  )}
+                                </button>
 
-                    <div className="lg:col-span-3 flex items-end">
-                      <button
-                        type="button"
-                        disabled={isBusy}
-                        onClick={() => handleActivate(sheet)}
-                        className="w-full inline-flex items-center justify-center gap-1.5 h-9 px-3 text-xs font-semibold text-white bg-teal-700 rounded-md hover:bg-teal-800 disabled:opacity-60 transition-colors whitespace-nowrap"
-                      >
-                        <Link2 className="w-3.5 h-3.5" />
-                        {isBusy
-                          ? 'Menyinkronkan...'
-                          : isActive
-                          ? 'Perbarui & Sinkron'
-                          : 'Aktifkan Hak Akses Web'}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
+                                {isActive && (
+                                  <button
+                                    type="button"
+                                    disabled={isBusy}
+                                    onClick={() => handleActivate(sheet)}
+                                    title="Sinkronkan ulang header & data"
+                                    className="inline-flex items-center gap-1 h-7 px-2 text-[11px] font-medium text-teal-700 bg-teal-50 border border-teal-200 rounded hover:bg-teal-100 disabled:opacity-50"
+                                  >
+                                    <RefreshCw
+                                      className={`w-3 h-3 ${
+                                        isBusy ? 'animate-spin' : ''
+                                      }`}
+                                    />
+                                    Sinkron
+                                  </button>
+                                )}
+
+                                {isActive && (
+                                  <button
+                                    type="button"
+                                    onClick={() => onRevokeSheetAccess(sheet)}
+                                    className="h-7 px-2 text-[11px] font-medium text-slate-500 hover:text-red-700 hover:bg-red-50 rounded"
+                                  >
+                                    Nonaktifkan
+                                  </button>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+
+                          {/* Inline Expandable Editor Row */}
+                          {isExpanded && (
+                            <tr className="bg-slate-50/90">
+                              <td colSpan={6} className="px-5 py-4">
+                                <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 items-end">
+                                  <div className="lg:col-span-5">
+                                    <label className="block text-[11px] font-medium text-slate-600 mb-1">
+                                      URL Webhook Web App hasil cangkok doPost
+                                      (/exec)
+                                    </label>
+                                    <input
+                                      type="url"
+                                      value={draftWebhook}
+                                      onChange={(e) =>
+                                        setWebhookDrafts((prev) => ({
+                                          ...prev,
+                                          [sheet.id]: e.target.value,
+                                        }))
+                                      }
+                                      placeholder="https://script.google.com/macros/s/.../exec"
+                                      className="w-full h-9 px-3 text-xs font-mono bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
+                                    />
+                                  </div>
+
+                                  <div className="lg:col-span-4">
+                                    <label className="block text-[11px] font-medium text-slate-600 mb-1">
+                                      Header Kolom Baris 1 (otomatis terdeteksi
+                                      / bisa diedit)
+                                    </label>
+                                    <input
+                                      type="text"
+                                      value={draftHeaders}
+                                      onChange={(e) =>
+                                        setHeaderDrafts((prev) => ({
+                                          ...prev,
+                                          [sheet.id]: e.target.value,
+                                        }))
+                                      }
+                                      placeholder="Kolom 1, Kolom 2, Kolom 3"
+                                      className="w-full h-9 px-3 text-xs bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
+                                    />
+                                  </div>
+
+                                  <div className="lg:col-span-3 flex items-center gap-2">
+                                    <button
+                                      type="button"
+                                      disabled={isBusy}
+                                      onClick={() => handleActivate(sheet)}
+                                      className="flex-1 inline-flex items-center justify-center gap-1.5 h-9 px-3 text-xs font-semibold text-white bg-teal-700 rounded-md hover:bg-teal-800 disabled:opacity-60 transition-colors whitespace-nowrap"
+                                    >
+                                      <Link2 className="w-3.5 h-3.5" />
+                                      {isBusy
+                                        ? 'Menyinkronkan...'
+                                        : isActive
+                                        ? 'Simpan & Sinkron'
+                                        : 'Aktifkan Akses'}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setExpandedSheetId(null)}
+                                      className="h-9 px-2.5 text-xs font-medium text-slate-600 bg-white border border-slate-300 rounded-md hover:bg-slate-100"
+                                    >
+                                      Tutup
+                                    </button>
+                                  </div>
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </React.Fragment>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            <div className="px-5 py-2.5 bg-slate-50/70 border-t border-slate-200 flex items-center justify-between text-[11px] text-slate-500">
+              <span className="font-mono tabular-nums">
+                Menampilkan {filteredSheets.length} dari {sheets.length} sheet
+                OPD
+              </span>
+              <span>
+                Klik tombol <strong>Atur / Cangkok</strong> pada baris untuk
+                mengubah URL Webhook atau Header Kolom.
+              </span>
+            </div>
           </div>
         )}
       </section>
