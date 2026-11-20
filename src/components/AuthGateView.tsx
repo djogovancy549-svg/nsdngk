@@ -2,6 +2,8 @@ import React, { useState } from 'react';
 import {
   AlertTriangle,
   BookOpen,
+  Eye,
+  EyeOff,
   LogIn,
   ShieldCheck,
   UserPlus,
@@ -70,6 +72,7 @@ export function AuthGateView({
   const [loginRole, setLoginRole] = useState<'opd' | 'super_admin'>('opd');
   const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [honeypotTrap, setHoneypotTrap] = useState('');
   const [failedCount, setFailedCount] = useState(0);
   const [challenge, setChallenge] = useState(() => generateDynamicChallenge());
@@ -536,11 +539,8 @@ export function AuthGateView({
                     type="email"
                     value={identifier}
                     onChange={(e) => setIdentifier(e.target.value)}
-                    placeholder={
-                      loginRole === 'super_admin'
-                        ? 'walidata@nagekeokab.go.id'
-                        : 'nama.opd@nagekeokab.go.id'
-                    }
+                    placeholder="Masukkan alamat email"
+                    autoComplete="email"
                     className="w-full h-10 px-3 text-sm bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
                     required
                   />
@@ -558,15 +558,39 @@ export function AuthGateView({
                   >
                     Kata Sandi
                   </label>
-                  <input
-                    id="login-password"
-                    type="password"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    placeholder="Masukkan kata sandi"
-                    className="w-full h-10 px-3 text-sm bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
-                    required
-                  />
+                  <div className="relative">
+                    <input
+                      id="login-password"
+                      type={showPassword ? 'text' : 'password'}
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      placeholder="Masukkan kata sandi"
+                      autoComplete="current-password"
+                      className="w-full h-10 pl-3 pr-10 text-sm bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
+                      required
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword((prev) => !prev)}
+                      aria-label={
+                        showPassword
+                          ? 'Sembunyikan kata sandi'
+                          : 'Lihat kata sandi'
+                      }
+                      title={
+                        showPassword
+                          ? 'Sembunyikan kata sandi'
+                          : 'Lihat kata sandi'
+                      }
+                      className="absolute inset-y-0 right-0 flex items-center px-3 text-slate-400 hover:text-slate-700 focus:outline-none"
+                    >
+                      {showPassword ? (
+                        <EyeOff className="w-4 h-4" />
+                      ) : (
+                        <Eye className="w-4 h-4" />
+                      )}
+                    </button>
+                  </div>
                 </div>
 
                 {requireDynamicChallenge && (
@@ -727,7 +751,7 @@ export function AuthGateView({
                       type="email"
                       value={email}
                       onChange={(e) => setEmail(e.target.value)}
-                      placeholder="opd@nagekeokab.go.id"
+                      placeholder="Masukkan alamat email"
                       className="w-full h-10 px-3 text-sm bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
                       required
                     />
