@@ -1,18 +1,10 @@
 import { ArrowRight, CheckCircle2, Clock, Database } from 'lucide-react';
 import {
-  Bar,
-  BarChart,
-  CartesianGrid,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from 'recharts';
-import {
   DynamicSheetRow,
   OpdAccount,
   OpdDynamicSheet,
 } from '../types/satuData';
+import { AnalyticsBarDonutSection } from './AnalyticsBarDonutSection';
 import { HeroBannerSlider } from './HeroBannerSlider';
 
 interface RingkasanViewProps {
@@ -39,14 +31,30 @@ export function RingkasanView({
     0
   );
 
-  const chartData = sheets.map((s) => ({
+  const barData = sheets.map((s) => ({
     name:
       s.judulDataset.length > 18
         ? `${s.judulDataset.slice(0, 18)}…`
         : s.judulDataset,
-    opd: s.namaOpd,
-    baris: rowsBySheet[s.id]?.length ?? 0,
+    detail: s.namaOpd,
+    value: rowsBySheet[s.id]?.length ?? 0,
   }));
+
+  // Donut: proporsi baris data per OPD (jika belum ada baris, tampilkan proporsi status sheet)
+  const opdRowMap = new Map<string, number>();
+  for (const s of sheets) {
+    const count = rowsBySheet[s.id]?.length ?? 0;
+    if (count > 0) {
+      opdRowMap.set(s.namaOpd, (opdRowMap.get(s.namaOpd) ?? 0) + count);
+    }
+  }
+  const hasRowDistribution = opdRowMap.size > 0;
+  const donutData = hasRowDistribution
+    ? Array.from(opdRowMap.entries()).map(([name, value]) => ({ name, value }))
+    : [
+        { name: 'Sheet Aktif', value: activeSheets.length },
+        { name: 'Menunggu Cangkok', value: pendingSheets.length },
+      ];
 
   return (
     <div className="space-y-8">
@@ -143,129 +151,87 @@ export function RingkasanView({
         </div>
       </div>
 
-      {/* Chart + Registered Sheets Overview */}
-      <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-stretch">
-        <div className="xl:col-span-7 bg-white border border-slate-200 rounded-lg p-5 flex flex-col">
-          <div className="mb-4">
+      {/* Grafik Bar & Grafik Donut Super Admin */}
+      <AnalyticsBarDonutSection
+        barTitle="Grafik Batang — Volume Baris Data per Dataset OPD"
+        barSubtitle="Perbandingan jumlah baris data yang telah masuk dari masing-masing Google Sheet OPD."
+        barSeriesLabel="Jumlah Baris"
+        barData={barData}
+        barEmptyText="Belum ada dataset OPD yang terhubung. Grafik batang akan terisi otomatis saat sheet terdaftar."
+        donutTitle={
+          hasRowDistribution
+            ? 'Grafik Donat — Proporsi Data Masuk per OPD'
+            : 'Grafik Donat — Status Integrasi Sheet OPD'
+        }
+        donutSubtitle={
+          hasRowDistribution
+            ? 'Kontribusi persentase total baris data sektoral dari masing-masing dinas.'
+            : 'Perbandingan sheet aktif melawan sheet menunggu pencangkokan skrip.'
+        }
+        donutCenterLabel={hasRowDistribution ? 'Total Baris' : 'Total Sheet'}
+        donutData={donutData}
+        donutEmptyText="Belum ada sheet OPD yang terdaftar untuk ditampilkan pada grafik donat."
+      />
+
+      {/* Registered Sheets Overview */}
+      <div className="bg-white border border-slate-200 rounded-lg overflow-hidden">
+        <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between gap-2">
+          <div>
             <h2 className="text-base font-semibold text-slate-900">
-              Volume Baris Data per Dataset OPD
+              Status Integrasi Sheet OPD
             </h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              Jumlah baris data masuk dari masing-masing Google Sheet milik OPD.
+              Daftar dataset yang diajukan dinas dan status pencangkokan skrip.
             </p>
           </div>
-          {chartData.length === 0 ? (
-            <div className="flex-1 min-h-[240px] flex flex-col items-center justify-center text-center px-4">
-              <p className="text-sm font-medium text-slate-900">
-                Belum ada dataset OPD yang terhubung
-              </p>
-              <p className="mt-1 text-xs text-slate-500 max-w-sm">
-                Grafik akan terisi otomatis setelah OPD mendaftarkan URL Google
-                Sheet dan data mulai masuk.
-              </p>
-            </div>
-          ) : (
-            <div className="flex-1 min-h-[260px]">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart
-                  data={chartData}
-                  margin={{ top: 8, right: 12, left: -12, bottom: 4 }}
-                >
-                  <CartesianGrid
-                    strokeDasharray="3 3"
-                    vertical={false}
-                    stroke="#E2E8F0"
-                  />
-                  <XAxis
-                    dataKey="name"
-                    tick={{ fontSize: 11, fill: '#475569' }}
-                    axisLine={{ stroke: '#CBD5E1' }}
-                    tickLine={false}
-                  />
-                  <YAxis
-                    allowDecimals={false}
-                    tick={{ fontSize: 12, fill: '#475569' }}
-                    axisLine={false}
-                    tickLine={false}
-                  />
-                  <Tooltip
-                    cursor={{ fill: '#F1F5F9' }}
-                    contentStyle={{
-                      backgroundColor: '#FFFFFF',
-                      borderColor: '#CBD5E1',
-                      borderRadius: '6px',
-                      fontSize: '12px',
-                    }}
-                  />
-                  <Bar
-                    dataKey="baris"
-                    name="Jumlah Baris"
-                    fill="#0B1B2B"
-                    radius={[4, 4, 0, 0]}
-                  />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          )}
+          <button
+            type="button"
+            onClick={onGoToAkunSheet}
+            className="text-xs font-medium text-slate-700 hover:text-slate-900 underline decoration-slate-300 whitespace-nowrap"
+          >
+            Kelola
+          </button>
         </div>
 
-        <div className="xl:col-span-5 bg-white border border-slate-200 rounded-lg overflow-hidden flex flex-col">
-          <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between gap-2">
-            <div>
-              <h2 className="text-base font-semibold text-slate-900">
-                Status Integrasi Sheet OPD
-              </h2>
-              <p className="text-xs text-slate-500 mt-0.5">
-                Daftar dataset yang diajukan dinas.
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={onGoToAkunSheet}
-              className="text-xs font-medium text-slate-700 hover:text-slate-900 underline decoration-slate-300 whitespace-nowrap"
-            >
-              Kelola
-            </button>
+        {sheets.length === 0 ? (
+          <div className="py-12 px-6 text-center text-xs text-slate-500">
+            Belum ada Google Sheet OPD yang didaftarkan.
           </div>
-
-          {sheets.length === 0 ? (
-            <div className="flex-1 py-12 px-6 text-center text-xs text-slate-500">
-              Belum ada Google Sheet OPD yang didaftarkan.
-            </div>
-          ) : (
-            <div className="divide-y divide-slate-100 flex-1">
-              {sheets.map((s) => (
-                <div
-                  key={s.id}
-                  onClick={onGoToDataMasuk}
-                  className="px-5 py-3 hover:bg-slate-50 cursor-pointer flex items-center justify-between gap-3"
-                >
-                  <div className="min-w-0">
-                    <p className="text-sm font-medium text-slate-900 truncate">
-                      {s.judulDataset}
-                    </p>
-                    <p className="text-xs text-slate-500 truncate">
-                      {s.namaOpd} · {s.headers.length} kolom
-                    </p>
-                  </div>
-                  <div className="shrink-0">
-                    {s.status === 'Aktif' ? (
-                      <span className="inline-flex items-center gap-1 text-xs font-medium text-emerald-700">
-                        <CheckCircle2 className="w-3.5 h-3.5" />
-                        Aktif
-                      </span>
-                    ) : (
-                      <span className="inline-flex items-center gap-1 text-xs font-medium text-amber-700">
-                        <Clock className="w-3.5 h-3.5" />
-                        Pending
-                      </span>
-                    )}
-                  </div>
+        ) : (
+          <div className="divide-y divide-slate-100">
+            {sheets.map((s) => (
+              <div
+                key={s.id}
+                onClick={onGoToDataMasuk}
+                className="px-5 py-3 hover:bg-slate-50 cursor-pointer flex items-center justify-between gap-3"
+              >
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-slate-900 truncate">
+                    {s.judulDataset}
+                  </p>
+                  <p className="text-xs text-slate-500 truncate">
+                    {s.namaOpd} · {s.headers.length} kolom ·{' '}
+                    {(rowsBySheet[s.id]?.length ?? 0).toLocaleString('id-ID')}{' '}
+                    baris
+                  </p>
                 </div>
-              ))}
-            </div>
-          )}
-        </div>
+                <div className="shrink-0">
+                  {s.status === 'Aktif' ? (
+                    <span className="inline-flex items-center gap-1 text-xs font-medium text-emerald-700">
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      Aktif
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 text-xs font-medium text-amber-700">
+                      <Clock className="w-3.5 h-3.5" />
+                      Pending
+                    </span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

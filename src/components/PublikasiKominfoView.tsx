@@ -35,6 +35,7 @@ import {
   PublishStatus,
   PublishedDatasetClone,
 } from '../types/satuData';
+import { AnalyticsBarDonutSection } from './AnalyticsBarDonutSection';
 
 interface PublikasiKominfoViewProps {
   sheets: OpdDynamicSheet[];
@@ -274,7 +275,22 @@ export function PublikasiKominfoView({
   const publishedCount = clones.filter(
     (c) => c.statusPublikasi === 'Dipublikasikan'
   ).length;
+  const draftCount = clones.length - publishedCount;
   const isWebhookLive = !isPlaceholderEndpoint(pubWebhookUrl);
+
+  const pubBarData = clones.map((c) => ({
+    name:
+      c.judulPublikasi.length > 18
+        ? `${c.judulPublikasi.slice(0, 18)}…`
+        : c.judulPublikasi,
+    detail: c.sourceOpdNama,
+    value: c.rows.length,
+  }));
+
+  const pubDonutData = [
+    { name: 'Dipublikasikan', value: publishedCount },
+    { name: 'Draft', value: draftCount },
+  ];
 
   return (
     <div className="space-y-8">
@@ -307,6 +323,20 @@ export function PublikasiKominfoView({
           </span>
         </div>
       </div>
+
+      {/* Grafik Bar & Grafik Donut Publikasi Kominfo */}
+      <AnalyticsBarDonutSection
+        barTitle="Grafik Batang — Volume Baris per Dataset Publikasi"
+        barSubtitle="Jumlah baris data terkurasi yang telah di-clone ke katalog publikasi Dinas Kominfo."
+        barSeriesLabel="Baris Terpublikasi"
+        barData={pubBarData}
+        barEmptyText="Belum ada dataset hasil cloning publikasi. Buat clone dari data OPD di bawah untuk melihat grafik."
+        donutTitle="Grafik Donat — Proporsi Status Publikasi"
+        donutSubtitle="Perbandingan jumlah dataset yang sudah tayang publik melawan status Draft."
+        donutCenterLabel="Total Clone"
+        donutData={pubDonutData}
+        donutEmptyText="Belum ada dataset publikasi yang tersedia untuk grafik donat."
+      />
 
       {/* Section 1: Konfigurasi Google Sheet Publikasi Dinas Kominfo */}
       <section className="bg-white border border-slate-200 rounded-lg overflow-hidden">

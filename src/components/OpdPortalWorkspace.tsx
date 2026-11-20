@@ -45,6 +45,7 @@ import {
   OpdDynamicSheet,
   UserSession,
 } from '../types/satuData';
+import { AnalyticsBarDonutSection } from './AnalyticsBarDonutSection';
 import { HeroBannerSlider } from './HeroBannerSlider';
 import { RunningSummaryTicker } from './RunningSummaryTicker';
 
@@ -132,6 +133,7 @@ export function OpdPortalWorkspace({
   );
   const [newTabName, setNewTabName] = useState('');
   const [loadingNewTab, setLoadingNewTab] = useState(false);
+  const [selectedChartColumn, setSelectedChartColumn] = useState<string>('');
 
   // Per-OPD Security PIN for delete protection
   const opdPinKey = session.opdId || session.id;
@@ -1075,6 +1077,80 @@ export function OpdPortalWorkspace({
                     ))}
                   </div>
                 </section>
+
+                {/* Grafik Bar & Grafik Donut Real-Time Sheet OPD */}
+                {(() => {
+                  const activeCol =
+                    currentSheet.headers.includes(selectedChartColumn)
+                      ? selectedChartColumn
+                      : currentSheet.headers[0] || '';
+
+                  // Hitung distribusi nilai untuk kolom terpilih (maks 8 kategori teratas)
+                  const freqMap = new Map<string, number>();
+                  if (activeCol) {
+                    for (const row of currentRows) {
+                      const raw = String(row.values[activeCol] ?? '').trim();
+                      const label = raw || 'Kosong';
+                      freqMap.set(label, (freqMap.get(label) ?? 0) + 1);
+                    }
+                  }
+                  const columnDistData = Array.from(freqMap.entries())
+                    .sort((a, b) => b[1] - a[1])
+                    .slice(0, 8)
+                    .map(([name, value]) => ({
+                      name: name.length > 18 ? `${name.slice(0, 18)}…` : name,
+                      value,
+                    }));
+
+                  const useMultiTabBar = sameWorkbookSheets.length > 1;
+                  const opdBarData = useMultiTabBar
+                    ? sameWorkbookSheets.map((ts) => ({
+                        name: ts.sheetName,
+                        value: rowsBySheet[ts.id]?.length ?? 0,
+                      }))
+                    : columnDistData;
+
+                  return (
+                    <AnalyticsBarDonutSection
+                      barTitle={
+                        useMultiTabBar
+                          ? 'Grafik Batang — Volume Baris per Tab Sheet'
+                          : `Grafik Batang — Distribusi Kolom "${activeCol || '-'}"`
+                      }
+                      barSubtitle={
+                        useMultiTabBar
+                          ? `Perbandingan jumlah baris data pada ${sameWorkbookSheets.length} tab dalam workbook ini.`
+                          : `Frekuensi data terbanyak pada kolom ${activeCol || '-'} (${currentSheet.sheetName}).`
+                      }
+                      barSeriesLabel="Jumlah Baris"
+                      barData={opdBarData}
+                      barEmptyText="Belum ada data pada sheet ini. Klik Input Data untuk mulai menambahkan baris."
+                      donutTitle={`Grafik Donat — Proporsi Kolom "${activeCol || '-'}"`}
+                      donutSubtitle={`Distribusi persentase nilai pada tab ${currentSheet.sheetName}.`}
+                      donutCenterLabel="Baris"
+                      donutData={columnDistData}
+                      donutEmptyText="Belum ada baris data untuk divisualisasikan pada grafik donat."
+                      donutHeaderRight={
+                        currentSheet.headers.length > 1 ? (
+                          <select
+                            aria-label="Pilih kolom grafik donat"
+                            value={activeCol}
+                            onChange={(e) =>
+                              setSelectedChartColumn(e.target.value)
+                            }
+                            className="h-8 px-2.5 text-xs bg-slate-50 border border-slate-300 rounded-md text-slate-800 focus:outline-none focus:border-slate-900"
+                          >
+                            {currentSheet.headers.map((h) => (
+                              <option key={h} value={h}>
+                                {h}
+                              </option>
+                            ))}
+                          </select>
+                        ) : null
+                      }
+                    />
+                  );
+                })()}
 
                 {/* Auto-Generated Dynamic Table */}
                 <section className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-xs">
