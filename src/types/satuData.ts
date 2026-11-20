@@ -101,12 +101,31 @@ export interface SecurityEventEntry {
     | 'Injeksi Payload'
     | 'Kebocoran PII'
     | 'Inspeksi Diblokir'
+    | 'Perangkap Honeypot'
     | 'Audit AI';
   tingkat: SecuritySeverity;
   aktor: string;
   target: string;
   detail: string;
   diblokir: boolean;
+}
+
+export interface ServerIntrusionAlert {
+  id: string;
+  timestamp: string;
+  ip: string;
+  path: string;
+  jenisAncaman: string;
+  taktikPengelabuan: string;
+  tingkat: SecuritySeverity;
+}
+
+export interface DeceptionConfig {
+  honeypotEndpointsAktif: boolean;
+  formHoneypotAktif: boolean;
+  tarpitDelayAktif: boolean;
+  tantanganDinamisAktif: boolean;
+  peringatanAiOtomatis: boolean;
 }
 
 export type AuditActionType =

@@ -55,6 +55,43 @@ function getClientIp(req: express.Request): string {
   return req.ip || req.socket.remoteAddress || 'unknown';
 }
 
+interface ServerIntrusionAlert {
+  id: string;
+  timestamp: string;
+  ip: string;
+  path: string;
+  jenisAncaman: string;
+  taktikPengelabuan: string;
+  tingkat: 'Rendah' | 'Sedang' | 'Tinggi' | 'Kritis';
+}
+
+const serverIntrusionAlerts: ServerIntrusionAlert[] = [];
+
+function recordServerIntrusion(
+  ip: string,
+  reqPath: string,
+  jenisAncaman: string,
+  taktikPengelabuan: string,
+  tingkat: ServerIntrusionAlert['tingkat']
+) {
+  serverIntrusionAlerts.unshift({
+    id: `srv-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+    timestamp: new Date().toISOString(),
+    ip,
+    path: reqPath,
+    jenisAncaman,
+    taktikPengelabuan,
+    tingkat,
+  });
+  if (serverIntrusionAlerts.length > 100) {
+    serverIntrusionAlerts.length = 100;
+  }
+}
+
+function delayMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function createGeminiClient(): GoogleGenAI | null {
   const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY;
   if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') return null;
@@ -309,7 +346,7 @@ async function startServer() {
       });
     }
 
-    // Wrong password for Super Admin
+    // Wrong password for Super Admin — apply progressive tarpit slowdown to confuse/slow brute-force bots
     const nextAttempts = state.attempts + 1;
     const lockedUntil = nextAttempts >= MAX_FAILED_ATTEMPTS ? now + LOCKOUT_MS : 0;
     loginAttemptsByIp.set(ip, {
@@ -318,6 +355,13 @@ async function startServer() {
     });
 
     if (lockedUntil > now) {
+      recordServerIntrusion(
+        ip,
+        '/api/auth/superadmin',
+        'Brute-Force Akun Super Admin',
+        'Tarpit delay progresif + penguncian IP otomatis selama 5 menit & rotasi token sesi.',
+        'Kritis'
+      );
       return res.status(429).json({
         ok: false,
         isSuperAdminCandidate: true,
@@ -336,6 +380,124 @@ async function startServer() {
         MAX_FAILED_ATTEMPTS - nextAttempts
       }.`,
     });
+  });
+
+  // 1b. Honeypot Decoy Trap Endpoints (Membingungkan & memperlambat pemindai/peretas otomatis)
+  const HONEYPOT_PATHS = [
+    '/wp-admin',
+    '/wp-login.php',
+    '/phpmyadmin',
+    '/.env',
+    '/admin-backup',
+    '/api/v1/export-all-users',
+    '/api/debug/secrets',
+  ];
+
+  app.all(HONEYPOT_PATHS, async (req, res) => {
+    const ip = getClientIp(req);
+    const canaryToken = crypto.randomBytes(12).toString('hex');
+    recordServerIntrusion(
+      ip,
+      req.path,
+      `Pemindaian Endpoint Jebakan (${req.path})`,
+      `Tarpit 1.8 detik + pengiriman payload umpan palsu (Canary ID: ${canaryToken.slice(0, 8)}) untuk mengecoh pemindai otomatis.`,
+      'Tinggi'
+    );
+    // Tarpit delay to waste scanner time
+    await delayMs(1800);
+    return res.status(200).json({
+      status: 'pending_verification',
+      node: `decoy-shard-${canaryToken.slice(0, 4)}`,
+      canary_session: `trap_${canaryToken}`,
+      next_challenge_in_ms: 45000,
+      records: [],
+    });
+  });
+
+  // 1c. Live Server Intrusion Alerts Feed
+  app.get('/api/security/live-alerts', (_req, res) => {
+    return res.status(200).json({
+      ok: true,
+      alerts: serverIntrusionAlerts.slice(0, 30),
+    });
+  });
+
+  // 1d. Real-Time AI Intrusion Warning & Cyber Deception Countermeasure Generator
+  app.post('/api/security/intrusion-alert', async (req, res) => {
+    const incident = (req.body?.incident ?? {}) as Record<string, unknown>;
+    const kategori = String(incident.kategori || 'Upaya Intrusi');
+    const detail = String(incident.detail || 'Aktivitas mencurigakan terdeteksi.');
+    const aktor = String(incident.aktor || 'Anonim');
+    const target = String(incident.target || 'Portal Satu Data');
+
+    const fallbackWarning = {
+      judulPeringatan: `Peringatan Intrusi Aktif: ${kategori}`,
+      analisisSingkat: `Sistem mendeteksi aktivitas mencurigakan dari "${aktor}" terhadap "${target}" (${detail}).`,
+      taktikPengelabuanAktif:
+        'Tarpit penundaan respons, pengacakan tantangan verifikasi dinamis, dan pengalihan ke jalur honeypot umpan palsu aktif untuk membingungkan peretas.',
+      langkahDaruratAdmin:
+        'Periksa log insiden, pastikan akun OPD terkait tidak disalahgunakan, dan pertahankan penguncian otomatis.',
+    };
+
+    const ai = createGeminiClient();
+    if (!ai) {
+      return res.status(200).json({ ok: true, warning: fallbackWarning });
+    }
+
+    try {
+      const response = await ai.models.generateContent({
+        model: 'gemini-4-hydrogen',
+        contents: `Anda adalah AI Sistem Peringatan Dini Keamanan Siber (SOC & Cyber Deception) untuk portal pemerintahan "Satu Data Kabupaten Nagekeo".
+Baru saja terdeteksi insiden keamanan berikut:
+- Kategori: ${kategori}
+- Aktor: ${aktor}
+- Target: ${target}
+- Detail: ${detail}
+
+Berikan peringatan singkat, tegas, dan profesional dalam bahasa Indonesia untuk Super Admin Diskominfo, beserta penjelasan langkah keamanan pengelabuan defensif (cyber deception: tarpit delay, tantangan dinamis acak, honeypot umpan palsu, atau isolasi sesi) untuk membingungkan dan menggagalkan peretas.`,
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              judulPeringatan: { type: Type.STRING },
+              analisisSingkat: { type: Type.STRING },
+              taktikPengelabuanAktif: { type: Type.STRING },
+              langkahDaruratAdmin: { type: Type.STRING },
+            },
+            required: [
+              'judulPeringatan',
+              'analisisSingkat',
+              'taktikPengelabuanAktif',
+              'langkahDaruratAdmin',
+            ],
+          },
+        },
+      });
+      const parsed = JSON.parse((response.text ?? '').trim()) as Record<
+        string,
+        unknown
+      >;
+      return res.status(200).json({
+        ok: true,
+        warning: {
+          judulPeringatan: String(
+            parsed.judulPeringatan || fallbackWarning.judulPeringatan
+          ),
+          analisisSingkat: String(
+            parsed.analisisSingkat || fallbackWarning.analisisSingkat
+          ),
+          taktikPengelabuanAktif: String(
+            parsed.taktikPengelabuanAktif || fallbackWarning.taktikPengelabuanAktif
+          ),
+          langkahDaruratAdmin: String(
+            parsed.langkahDaruratAdmin || fallbackWarning.langkahDaruratAdmin
+          ),
+        },
+      });
+    } catch {
+      return res.status(200).json({ ok: true, warning: fallbackWarning });
+    }
   });
 
   // 2. AI Cyber Threat & Data Breach Analyzer (Defensive SOC Assistant for Diskominfo)

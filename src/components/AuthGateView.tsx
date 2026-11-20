@@ -1,6 +1,13 @@
 import React, { useState } from 'react';
-import { LogIn, ShieldCheck, UserPlus } from 'lucide-react';
+import { AlertTriangle, LogIn, ShieldCheck, UserPlus } from 'lucide-react';
 import { OPD_DIRECTORY } from '../config/opdSheets';
+import {
+  AiIntrusionWarning,
+  appendSecurityEvent,
+  inspectLoginInputForAttack,
+  loadDeceptionConfig,
+  requestAiIntrusionWarning,
+} from '../services/cyberSecurityService';
 import {
   DynamicSheetRow,
   OpdAccount,
@@ -8,6 +15,17 @@ import {
 } from '../types/satuData';
 import { HeroBannerSlider } from './HeroBannerSlider';
 import { RunningSummaryTicker } from './RunningSummaryTicker';
+
+function generateDynamicChallenge() {
+  const a = Math.floor(Math.random() * 8) + 2;
+  const b = Math.floor(Math.random() * 8) + 2;
+  const token = Math.random().toString(36).slice(2, 6).toUpperCase();
+  return {
+    question: `${a} + ${b}`,
+    answer: String(a + b),
+    token,
+  };
+}
 
 interface AuthGateViewProps {
   accounts: OpdAccount[];
@@ -40,6 +58,11 @@ export function AuthGateView({
   // Login state
   const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
+  const [honeypotTrap, setHoneypotTrap] = useState('');
+  const [failedCount, setFailedCount] = useState(0);
+  const [challenge, setChallenge] = useState(() => generateDynamicChallenge());
+  const [challengeInput, setChallengeInput] = useState('');
+  const [aiWarning, setAiWarning] = useState<AiIntrusionWarning | null>(null);
   const [loginBusy, setLoginBusy] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
 
@@ -58,16 +81,113 @@ export function AuthGateView({
     text: string;
   } | null>(null);
 
+  const deceptionCfg = loadDeceptionConfig();
+  const requireDynamicChallenge =
+    deceptionCfg.tantanganDinamisAktif && (failedCount >= 2 || aiWarning !== null);
+
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoginError(null);
     setLoginBusy(true);
     try {
+      // 1. Perangkap Form Honeypot (hanya bot/skrip otomatis yang mengisi medan tersembunyi ini)
+      if (deceptionCfg.formHoneypotAktif && honeypotTrap.trim().length > 0) {
+        appendSecurityEvent({
+          kategori: 'Perangkap Honeypot',
+          tingkat: 'Kritis',
+          aktor: identifier.trim() || 'Bot Otomatis',
+          target: 'Form Honeypot Login',
+          detail:
+            'Bot/skrip terdeteksi mengisi kolom jebakan tersembunyi. Tarpit & respons pengelabuan diaktifkan.',
+          diblokir: true,
+        });
+        if (deceptionCfg.tarpitDelayAktif) {
+          await new Promise((r) => setTimeout(r, 2000));
+        }
+        setChallenge(generateDynamicChallenge());
+        setLoginError(
+          'Node autentikasi sedang merotasi sesi (ERR-DECOY-409). Silakan tunggu dan ulangi verifikasi.'
+        );
+        return;
+      }
+
+      // 2. Deteksi Injeksi SQLi / XSS / Formula pada formulir login
+      const attackCheck = inspectLoginInputForAttack(identifier, password);
+      if (attackCheck.suspicious) {
+        appendSecurityEvent({
+          kategori: 'Injeksi Payload',
+          tingkat: 'Kritis',
+          aktor: identifier.slice(0, 40) || 'Anonim',
+          target: 'Formulir Masuk Portal',
+          detail:
+            attackCheck.reason ||
+            'Terdeteksi percobaan injeksi berbahaya pada kolom autentikasi.',
+          diblokir: true,
+        });
+        if (deceptionCfg.tarpitDelayAktif) {
+          await new Promise((r) => setTimeout(r, 1800));
+        }
+        setFailedCount((c) => c + 2);
+        setChallenge(generateDynamicChallenge());
+        setChallengeInput('');
+        if (deceptionCfg.peringatanAiOtomatis) {
+          const warn = await requestAiIntrusionWarning({
+            kategori: 'Injeksi Payload pada Login',
+            aktor: identifier.slice(0, 40) || 'Anonim',
+            target: 'Gerbang Autentikasi Satu Data',
+            detail:
+              attackCheck.reason ||
+              'Pola serangan injeksi terdeteksi dan diblokir.',
+          });
+          setAiWarning(warn);
+        }
+        setLoginError(
+          'Peringatan Keamanan AI: Upaya injeksi terdeteksi dan diblokir. Mode pengelabuan & verifikasi dinamis diaktifkan.'
+        );
+        return;
+      }
+
+      // 3. Verifikasi Tantangan Dinamis (aktif setelah gagal berulang / percobaan mencurigakan)
+      if (requireDynamicChallenge) {
+        if (challengeInput.trim() !== challenge.answer) {
+          setChallenge(generateDynamicChallenge());
+          setChallengeInput('');
+          setLoginError(
+            'Verifikasi keamanan dinamis tidak sesuai. Kode tantangan telah diacak ulang.'
+          );
+          return;
+        }
+      }
+
+      // 4. Tarpit delay progresif untuk memperlambat brute-force
+      if (deceptionCfg.tarpitDelayAktif && failedCount >= 2) {
+        await new Promise((r) =>
+          setTimeout(r, Math.min(2500, failedCount * 600))
+        );
+      }
+
       const res = await onLogin(identifier, password);
       if (!res.ok) {
+        const nextFail = failedCount + 1;
+        setFailedCount(nextFail);
+        setChallenge(generateDynamicChallenge());
+        setChallengeInput('');
         setLoginError(
           res.message || 'Gagal masuk. Periksa kembali kredensial Anda.'
         );
+
+        if (nextFail >= 3 && deceptionCfg.peringatanAiOtomatis) {
+          const warn = await requestAiIntrusionWarning({
+            kategori: 'Brute Force',
+            aktor: identifier.trim() || 'Anonim',
+            target: 'Gerbang Autentikasi Satu Data',
+            detail: `Terjadi ${nextFail} kali percobaan masuk gagal berulang.`,
+          });
+          setAiWarning(warn);
+        }
+      } else {
+        setFailedCount(0);
+        setAiWarning(null);
       }
     } finally {
       setLoginBusy(false);
@@ -275,11 +395,43 @@ export function AuthGateView({
                   </p>
                 </div>
 
+                {aiWarning && (
+                  <div className="p-3.5 text-xs bg-red-950 text-red-50 border border-red-800 rounded-md space-y-1.5">
+                    <div className="flex items-center gap-1.5 font-semibold text-amber-300">
+                      <AlertTriangle className="w-4 h-4 shrink-0" />
+                      <span>{aiWarning.judulPeringatan}</span>
+                    </div>
+                    <p className="text-red-100 leading-relaxed">
+                      {aiWarning.analisisSingkat}
+                    </p>
+                    <p className="text-[11px] text-teal-300 pt-1 border-t border-red-900">
+                      Pertahanan Aktif: {aiWarning.taktikPengelabuanAktif}
+                    </p>
+                  </div>
+                )}
+
                 {loginError && (
                   <div className="p-3 text-xs text-red-700 bg-red-50 border border-red-200 rounded-md">
                     {loginError}
                   </div>
                 )}
+
+                {/* Hidden Form Honeypot Trap (hanya diisi bot otomatis) */}
+                <div
+                  aria-hidden="true"
+                  className="absolute -left-[9999px] top-auto w-px h-px overflow-hidden"
+                >
+                  <label htmlFor="website_verification_url">Website</label>
+                  <input
+                    id="website_verification_url"
+                    name="website_verification_url"
+                    type="text"
+                    tabIndex={-1}
+                    autoComplete="off"
+                    value={honeypotTrap}
+                    onChange={(e) => setHoneypotTrap(e.target.value)}
+                  />
+                </div>
 
                 <div>
                   <label
@@ -316,6 +468,28 @@ export function AuthGateView({
                     required
                   />
                 </div>
+
+                {requireDynamicChallenge && (
+                  <div className="p-3 bg-amber-50 border border-amber-200 rounded-md space-y-2">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="font-semibold text-amber-900">
+                        Tantangan Verifikasi Dinamis #{challenge.token}
+                      </span>
+                      <span className="font-mono text-[11px] text-amber-700">
+                        Berapa {challenge.question} ?
+                      </span>
+                    </div>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      value={challengeInput}
+                      onChange={(e) => setChallengeInput(e.target.value)}
+                      placeholder="Masukkan hasil penjumlahan"
+                      className="w-full h-9 px-3 text-sm font-mono bg-white border border-amber-300 rounded-md focus:outline-none focus:border-slate-900"
+                      required
+                    />
+                  </div>
+                )}
 
                 <button
                   type="submit"

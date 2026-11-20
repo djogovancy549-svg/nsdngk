@@ -1,9 +1,11 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   Bot,
   CheckCircle2,
   Lock,
+  Radar,
+  RefreshCw,
   ScanSearch,
   ShieldAlert,
   ShieldCheck,
@@ -13,19 +15,27 @@ import {
 import { isPlaceholderEndpoint } from '../config/opdSheets';
 import { getActiveAuthSheetConfig } from '../services/authSheetService';
 import {
+  AiIntrusionWarning,
   AiPayloadInspection,
   AiThreatAnalysis,
   appendSecurityEvent,
+  fetchServerLiveAlerts,
+  HONEYPOT_DECOY_ENDPOINTS,
+  loadDeceptionConfig,
+  requestAiIntrusionWarning,
   requestAiPayloadInspection,
   requestAiThreatAnalysis,
+  saveDeceptionConfig,
   scanPiiExposure,
 } from '../services/cyberSecurityService';
 import { getActivePublishSheetConfig } from '../services/publishSheetService';
 import {
+  DeceptionConfig,
   OpdAccount,
   OpdDynamicSheet,
   PublishedDatasetClone,
   SecurityEventEntry,
+  ServerIntrusionAlert,
 } from '../types/satuData';
 
 interface KeamananSiberViewProps {
@@ -48,6 +58,67 @@ export function KeamananSiberView({
   const [analyzingAi, setAnalyzingAi] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
   const [aiReport, setAiReport] = useState<AiThreatAnalysis | null>(null);
+
+  const [deceptionCfg, setDeceptionCfg] = useState<DeceptionConfig>(() =>
+    loadDeceptionConfig()
+  );
+  const [serverAlerts, setServerAlerts] = useState<ServerIntrusionAlert[]>([]);
+  const [loadingAlerts, setLoadingAlerts] = useState(false);
+  const [testingTrap, setTestingTrap] = useState(false);
+  const [liveAiWarning, setLiveAiWarning] = useState<AiIntrusionWarning | null>(
+    null
+  );
+
+  const refreshServerAlerts = async () => {
+    setLoadingAlerts(true);
+    try {
+      const list = await fetchServerLiveAlerts();
+      setServerAlerts(list);
+    } finally {
+      setLoadingAlerts(false);
+    }
+  };
+
+  useEffect(() => {
+    refreshServerAlerts();
+  }, []);
+
+  const toggleDeception = (key: keyof DeceptionConfig) => {
+    setDeceptionCfg((prev) => {
+      const next = { ...prev, [key]: !prev[key] };
+      saveDeceptionConfig(next);
+      return next;
+    });
+  };
+
+  const handleTestHoneypotAndAiAlert = async () => {
+    setTestingTrap(true);
+    try {
+      // Uji coba aman memicu endpoint jebakan honeypot di server
+      await fetch('/api/v1/export-all-users', { method: 'GET' }).catch(() => {});
+      appendSecurityEvent({
+        kategori: 'Perangkap Honeypot',
+        tingkat: 'Kritis',
+        aktor: 'Uji Coba Defensif Admin',
+        target: '/api/v1/export-all-users (Honeypot)',
+        detail:
+          'Uji perangkap honeypot berhasil: tarpit delay + payload umpan palsu (Canary) dikirim untuk mengecoh pemindai.',
+        diblokir: true,
+      });
+      onRefreshEvents();
+      await refreshServerAlerts();
+      const warning = await requestAiIntrusionWarning({
+        kategori: 'Perangkap Honeypot & Pemindaian Ilegal',
+        aktor: 'Pemindai Otomatis (Simulasi Uji)',
+        target: '/api/v1/export-all-users',
+        detail:
+          'Upaya akses endpoint jebakan honeypot terdeteksi. Server mengaktifkan tarpit 1.8 detik dan mengembalikan token umpan palsu.',
+      });
+      setLiveAiWarning(warning);
+    } finally {
+      setTestingTrap(false);
+    }
+  };
 
   const [payloadInput, setPayloadInput] = useState('');
   const [inspectingPayload, setInspectingPayload] = useState(false);
@@ -541,6 +612,209 @@ export function KeamananSiberView({
             ))}
           </div>
         )}
+      </section>
+
+      {/* Cyber Deception & Active Honeypot Panel */}
+      <section className="bg-white border border-slate-200 rounded-lg overflow-hidden">
+        <div className="px-5 py-4 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div>
+            <h2 className="text-base font-semibold text-slate-900 flex items-center gap-2">
+              <Radar className="w-4 h-4 text-teal-700" />
+              Taktik Pengelabuan Peretas (Cyber Deception &amp; Honeypot)
+            </h2>
+            <p className="text-xs text-slate-500 mt-0.5">
+              Aktifkan perangkap jebakan, penundaan tarpit, tantangan dinamis
+              acak, dan peringatan AI instan untuk membingungkan serta
+              memperlambat peretas.
+            </p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={refreshServerAlerts}
+              disabled={loadingAlerts}
+              className="inline-flex items-center gap-1.5 h-8 px-3 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-md hover:bg-slate-50"
+            >
+              <RefreshCw
+                className={`w-3.5 h-3.5 ${loadingAlerts ? 'animate-spin' : ''}`}
+              />
+              Segarkan
+            </button>
+            <button
+              type="button"
+              onClick={handleTestHoneypotAndAiAlert}
+              disabled={testingTrap}
+              className="inline-flex items-center gap-1.5 h-8 px-3 text-xs font-semibold text-white bg-red-700 rounded-md hover:bg-red-800 disabled:opacity-60"
+            >
+              <AlertTriangle className="w-3.5 h-3.5" />
+              {testingTrap
+                ? 'Menguji Perangkap...'
+                : 'Uji Perangkap & Peringatan AI'}
+            </button>
+          </div>
+        </div>
+
+        <div className="p-5 space-y-5">
+          {liveAiWarning && (
+            <div className="p-4 bg-red-950 text-red-50 border border-red-800 rounded-lg space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-amber-300 font-semibold text-sm">
+                  <AlertTriangle className="w-4 h-4 shrink-0" />
+                  <span>{liveAiWarning.judulPeringatan}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setLiveAiWarning(null)}
+                  className="text-[11px] text-red-200 hover:text-white underline"
+                >
+                  Tutup
+                </button>
+              </div>
+              <p className="text-xs text-red-100 leading-relaxed">
+                {liveAiWarning.analisisSingkat}
+              </p>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-2 border-t border-red-900 text-xs">
+                <div>
+                  <p className="text-[11px] font-semibold text-teal-300">
+                    Langkah Pengelabuan Aktif (Membingungkan Peretas)
+                  </p>
+                  <p className="text-red-100 mt-0.5 leading-relaxed">
+                    {liveAiWarning.taktikPengelabuanAktif}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-[11px] font-semibold text-amber-300">
+                    Tindakan Darurat Super Admin
+                  </p>
+                  <p className="text-red-100 mt-0.5 leading-relaxed">
+                    {liveAiWarning.langkahDaruratAdmin}
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Toggle Controls */}
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+            {[
+              {
+                key: 'honeypotEndpointsAktif' as const,
+                title: 'Endpoint Jebakan Honeypot',
+                desc: 'Mengirim payload umpan palsu (Canary) saat pemindai mengakses URL sensitif.',
+              },
+              {
+                key: 'formHoneypotAktif' as const,
+                title: 'Form Honeypot Anti-Bot',
+                desc: 'Kolom tersembunyi di halaman login untuk menjebak bot otomatis.',
+              },
+              {
+                key: 'tarpitDelayAktif' as const,
+                title: 'Tarpit Penundaan Progresif',
+                desc: 'Memperlambat respons secara otomatis saat terjadi brute-force atau injeksi.',
+              },
+              {
+                key: 'tantanganDinamisAktif' as const,
+                title: 'Tantangan Verifikasi Dinamis',
+                desc: 'Mengacak kode tantangan keamanan setelah percobaan login gagal berulang.',
+              },
+              {
+                key: 'peringatanAiOtomatis' as const,
+                title: 'Peringatan Intrusi AI Real-Time',
+                desc: 'AI langsung memberi peringatan dan taktik mitigasi saat ada upaya retas.',
+              },
+            ].map((item) => {
+              const active = deceptionCfg[item.key];
+              return (
+                <button
+                  key={item.key}
+                  type="button"
+                  onClick={() => toggleDeception(item.key)}
+                  className={`text-left p-3.5 rounded-lg border transition-colors ${
+                    active
+                      ? 'bg-teal-50/60 border-teal-300'
+                      : 'bg-slate-50 border-slate-200'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-semibold text-slate-900">
+                      {item.title}
+                    </span>
+                    <span
+                      className={`text-[10px] font-semibold px-2 py-0.5 rounded ${
+                        active
+                          ? 'bg-teal-700 text-white'
+                          : 'bg-slate-300 text-slate-700'
+                      }`}
+                    >
+                      {active ? 'AKTIF' : 'NONAKTIF'}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-600 mt-1 leading-relaxed">
+                    {item.desc}
+                  </p>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Decoy Endpoints & Live Server Hits */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 pt-2 border-t border-slate-100">
+            <div className="lg:col-span-5 space-y-2">
+              <p className="text-xs font-semibold text-slate-800">
+                Jalur Jebakan Honeypot Aktif di Server
+              </p>
+              <div className="flex flex-wrap gap-1.5">
+                {HONEYPOT_DECOY_ENDPOINTS.map((ep) => (
+                  <code
+                    key={ep}
+                    className="px-2 py-1 text-[11px] font-mono bg-slate-100 text-slate-700 border border-slate-200 rounded"
+                  >
+                    {ep}
+                  </code>
+                ))}
+              </div>
+              <p className="text-[11px] text-slate-500">
+                Setiap akses ke jalur di atas otomatis ditahan dengan tarpit
+                delay 1.8 detik, diberi data umpan kosong (Canary ID), dan
+                dicatat sebagai upaya peretasan.
+              </p>
+            </div>
+
+            <div className="lg:col-span-7 space-y-2">
+              <p className="text-xs font-semibold text-slate-800">
+                Deteksi Perangkap Server Real-Time ({serverAlerts.length})
+              </p>
+              {serverAlerts.length === 0 ? (
+                <div className="p-4 text-xs text-slate-500 bg-slate-50 border border-slate-200 rounded-md">
+                  Belum ada pemindai atau peretas yang menyentuh jalur jebakan
+                  server. Klik &ldquo;Uji Perangkap &amp; Peringatan AI&rdquo;
+                  untuk mensimulasikan deteksi.
+                </div>
+              ) : (
+                <div className="divide-y divide-slate-100 border border-slate-200 rounded-md max-h-52 overflow-y-auto">
+                  {serverAlerts.map((al) => (
+                    <div key={al.id} className="p-3 text-xs space-y-0.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-semibold text-red-700">
+                          {al.jenisAncaman}
+                        </span>
+                        <span className="font-mono text-[10px] text-slate-400">
+                          {new Date(al.timestamp).toLocaleTimeString('id-ID')}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-600">
+                        {al.taktikPengelabuan}
+                      </p>
+                      <p className="text-[10px] font-mono text-slate-400">
+                        IP: {al.ip} · Path: {al.path}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
       </section>
 
       {/* Security Incident Log */}

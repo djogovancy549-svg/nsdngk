@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Menu, RefreshCw, X } from 'lucide-react';
+import { AlertTriangle, Menu, RefreshCw, X } from 'lucide-react';
 import { AktivitasView } from './components/AktivitasView';
 import { AkunOpdView } from './components/AkunOpdView';
 import { AuthGateView } from './components/AuthGateView';
@@ -22,10 +22,14 @@ import {
   updateOpdAccountStatus,
 } from './services/authSheetService';
 import {
+  AiIntrusionWarning,
   appendSecurityEvent,
   clearSecurityEvents,
+  fetchServerLiveAlerts,
   inspectAndSanitizeValues,
+  loadDeceptionConfig,
   loadSecurityEvents,
+  requestAiIntrusionWarning,
 } from './services/cyberSecurityService';
 import {
   extractGoogleSheetId,
@@ -102,7 +106,46 @@ export default function App() {
     () => loadSecurityEvents()
   );
   const [notice, setNotice] = useState<string | null>(null);
+  const [activeAiAlert, setActiveAiAlert] = useState<AiIntrusionWarning | null>(
+    null
+  );
+  const seenServerAlertIdsRef = useRef<Set<string>>(new Set());
   const lastInspectLogRef = useRef<number>(0);
+
+  // Pantau peringatan peretasan real-time dari server untuk Super Admin
+  useEffect(() => {
+    if (session?.role !== 'super_admin') return;
+    let cancelled = false;
+
+    const pollAlerts = async () => {
+      const cfg = loadDeceptionConfig();
+      if (!cfg.peringatanAiOtomatis) return;
+      const alerts = await fetchServerLiveAlerts();
+      if (cancelled || alerts.length === 0) return;
+
+      const newest = alerts[0];
+      if (!seenServerAlertIdsRef.current.has(newest.id)) {
+        seenServerAlertIdsRef.current.add(newest.id);
+        const warning = await requestAiIntrusionWarning({
+          kategori: newest.jenisAncaman,
+          aktor: `IP ${newest.ip}`,
+          target: newest.path,
+          detail: newest.taktikPengelabuan,
+        });
+        if (!cancelled) {
+          setActiveAiAlert(warning);
+          setSecurityEvents(loadSecurityEvents());
+        }
+      }
+    };
+
+    pollAlerts();
+    const timer = window.setInterval(pollAlerts, 15000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [session?.role]);
 
   // Proteksi anti klik-kanan & pintasan inspeksi (DevTools / View Source)
   useEffect(() => {
@@ -129,6 +172,7 @@ export default function App() {
     };
 
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (typeof e.key !== 'string' || !e.key) return;
       const key = e.key.toLowerCase();
       const isF12 = e.key === 'F12';
       const isCtrlShiftInspect =
@@ -1142,6 +1186,45 @@ export default function App() {
             {syncingAll ? 'Menyinkronkan...' : 'Tarik Semua Data OPD'}
           </button>
         </header>
+
+        {activeAiAlert && (
+          <div className="bg-red-950 text-red-50 border-b border-red-800 px-4 sm:px-6 lg:px-8 py-3">
+            <div className="max-w-[1440px] mx-auto flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="space-y-0.5 min-w-0">
+                <div className="flex items-center gap-2 text-xs font-semibold text-amber-300">
+                  <AlertTriangle className="w-4 h-4 shrink-0" />
+                  <span>{activeAiAlert.judulPeringatan}</span>
+                </div>
+                <p className="text-xs text-red-100 leading-relaxed">
+                  {activeAiAlert.analisisSingkat}
+                </p>
+                <p className="text-[11px] text-teal-300">
+                  Pengelabuan Aktif: {activeAiAlert.taktikPengelabuanAktif}
+                </p>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSecurityEvents(loadSecurityEvents());
+                    setActiveSection('keamanan');
+                  }}
+                  className="h-8 px-3 text-xs font-semibold bg-amber-400 text-slate-950 rounded-md hover:bg-amber-300"
+                >
+                  Buka Pusat Keamanan
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveAiAlert(null)}
+                  className="p-1.5 text-red-200 hover:text-white rounded-md"
+                  aria-label="Tutup peringatan"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         <main className="flex-1 w-full max-w-[1280px] mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8">
           {notice && (

@@ -1,14 +1,58 @@
 import {
+  DeceptionConfig,
   OpdDynamicSheet,
   PublishedDatasetClone,
   SecurityEventEntry,
   SecuritySeverity,
+  ServerIntrusionAlert,
 } from '../types/satuData';
 
 const SECURITY_EVENTS_KEY = 'satu_data_nagekeo_sec_events_v1';
 const LOGIN_GUARD_KEY = 'satu_data_nagekeo_login_guard_v1';
+const DECEPTION_CONFIG_KEY = 'satu_data_nagekeo_deception_v1';
 const MAX_CLIENT_ATTEMPTS = 5;
 const CLIENT_LOCKOUT_MS = 60 * 1000;
+
+export const HONEYPOT_DECOY_ENDPOINTS = [
+  '/wp-admin',
+  '/wp-login.php',
+  '/phpmyadmin',
+  '/.env',
+  '/admin-backup',
+  '/api/v1/export-all-users',
+  '/api/debug/secrets',
+];
+
+export const DEFAULT_DECEPTION_CONFIG: DeceptionConfig = {
+  honeypotEndpointsAktif: true,
+  formHoneypotAktif: true,
+  tarpitDelayAktif: true,
+  tantanganDinamisAktif: true,
+  peringatanAiOtomatis: true,
+};
+
+export function loadDeceptionConfig(): DeceptionConfig {
+  try {
+    const raw = localStorage.getItem(DECEPTION_CONFIG_KEY);
+    if (raw) {
+      return {
+        ...DEFAULT_DECEPTION_CONFIG,
+        ...(JSON.parse(raw) as Partial<DeceptionConfig>),
+      };
+    }
+  } catch {
+    // Abaikan
+  }
+  return DEFAULT_DECEPTION_CONFIG;
+}
+
+export function saveDeceptionConfig(cfg: DeceptionConfig): void {
+  try {
+    localStorage.setItem(DECEPTION_CONFIG_KEY, JSON.stringify(cfg));
+  } catch {
+    // Abaikan
+  }
+}
 
 export function loadSecurityEvents(): SecurityEventEntry[] {
   try {
@@ -475,4 +519,92 @@ export async function requestAiPayloadInspection(
     ok: true,
     inspection: buildClientFallbackPayloadInspection(payload),
   };
+}
+
+export function inspectLoginInputForAttack(
+  identifier: string,
+  password: string
+): { suspicious: boolean; reason?: string } {
+  const combined = `${identifier} ${password}`;
+  if (/<\s*script|javascript:|on\w+\s*=/i.test(combined)) {
+    return {
+      suspicious: true,
+      reason: 'Terdeteksi pola Cross-Site Scripting (XSS) pada kolom autentikasi.',
+    };
+  }
+  if (
+    /(\bunion\b\s+\bselect\b|\bdrop\b\s+\btable\b|'\s*or\s*'1'\s*=\s*'1|\bor\b\s+1\s*=\s*1|--\s*$)/i.test(
+      combined
+    )
+  ) {
+    return {
+      suspicious: true,
+      reason: 'Terdeteksi pola SQL Injection pada formulir masuk portal.',
+    };
+  }
+  if (/=(IMPORTXML|IMPORTRANGE|CMD|HYPERLINK)/i.test(combined)) {
+    return {
+      suspicious: true,
+      reason: 'Terdeteksi pola Formula Injection pada kolom masuk.',
+    };
+  }
+  return { suspicious: false };
+}
+
+export interface AiIntrusionWarning {
+  judulPeringatan: string;
+  analisisSingkat: string;
+  taktikPengelabuanAktif: string;
+  langkahDaruratAdmin: string;
+}
+
+export async function requestAiIntrusionWarning(incident: {
+  kategori: string;
+  aktor: string;
+  target: string;
+  detail: string;
+}): Promise<AiIntrusionWarning> {
+  try {
+    const res = await fetch('/api/security/intrusion-alert', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ incident }),
+    });
+    const contentType = res.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      const json = await res.json();
+      if (res.ok && json.ok && json.warning) {
+        return json.warning as AiIntrusionWarning;
+      }
+    }
+  } catch {
+    // Fallback
+  }
+  return {
+    judulPeringatan: `Peringatan Intrusi Aktif: ${incident.kategori}`,
+    analisisSingkat: `Terdeteksi aktivitas mencurigakan dari "${incident.aktor}" pada "${incident.target}". ${incident.detail}`,
+    taktikPengelabuanAktif:
+      'Tarpit penundaan progresif, pengacakan token tantangan verifikasi dinamis, dan pengalihan honeypot umpan palsu aktif untuk membingungkan peretas.',
+    langkahDaruratAdmin:
+      'Tinjau log insiden di menu Keamanan Siber & AI dan pastikan akun terkait aman.',
+  };
+}
+
+export async function fetchServerLiveAlerts(): Promise<ServerIntrusionAlert[]> {
+  try {
+    const res = await fetch('/api/security/live-alerts', {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+    });
+    const contentType = res.headers.get('content-type') || '';
+    if (res.ok && contentType.includes('application/json')) {
+      const json = await res.json();
+      if (json.ok && Array.isArray(json.alerts)) {
+        return json.alerts as ServerIntrusionAlert[];
+      }
+    }
+  } catch {
+    // Abaikan jika mode statis
+  }
+  return [];
 }
