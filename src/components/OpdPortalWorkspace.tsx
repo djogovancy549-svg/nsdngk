@@ -956,126 +956,212 @@ export function OpdPortalWorkspace({
                     </div>
                   </div>
 
-                  {/* Icon Cards for Sheets in This Workbook */}
-                  <div className="p-5 bg-slate-50/60 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3.5">
-                    {sameWorkbookSheets.map((tabSheet) => {
-                      const isCurrent = tabSheet.id === currentSheet.id;
-                      const tabRowCount = rowsBySheet[tabSheet.id]?.length ?? 0;
+                  {/* Compact Color-Varied Icon Cards for Sheets in This Workbook */}
+                  {(() => {
+                    const SHEET_CARD_THEMES = [
+                      {
+                        bar: 'bg-teal-500',
+                        activeCard: 'bg-teal-950 text-white border-teal-800 shadow-sm',
+                        idleCard: 'bg-white text-slate-900 border-slate-200 hover:border-teal-400',
+                        activeIcon: 'bg-teal-500/20 text-teal-300',
+                        idleIcon: 'bg-teal-50 text-teal-700',
+                        activeBtn: 'bg-teal-600 text-white hover:bg-teal-500',
+                        idleBtn: 'bg-teal-50/80 text-teal-800 hover:bg-teal-600 hover:text-white',
+                      },
+                      {
+                        bar: 'bg-sky-500',
+                        activeCard: 'bg-sky-950 text-white border-sky-800 shadow-sm',
+                        idleCard: 'bg-white text-slate-900 border-slate-200 hover:border-sky-400',
+                        activeIcon: 'bg-sky-500/20 text-sky-300',
+                        idleIcon: 'bg-sky-50 text-sky-700',
+                        activeBtn: 'bg-sky-600 text-white hover:bg-sky-500',
+                        idleBtn: 'bg-sky-50/80 text-sky-800 hover:bg-sky-600 hover:text-white',
+                      },
+                      {
+                        bar: 'bg-indigo-500',
+                        activeCard: 'bg-indigo-950 text-white border-indigo-800 shadow-sm',
+                        idleCard: 'bg-white text-slate-900 border-slate-200 hover:border-indigo-400',
+                        activeIcon: 'bg-indigo-500/20 text-indigo-300',
+                        idleIcon: 'bg-indigo-50 text-indigo-700',
+                        activeBtn: 'bg-indigo-600 text-white hover:bg-indigo-500',
+                        idleBtn: 'bg-indigo-50/80 text-indigo-800 hover:bg-indigo-600 hover:text-white',
+                      },
+                      {
+                        bar: 'bg-emerald-500',
+                        activeCard: 'bg-emerald-950 text-white border-emerald-800 shadow-sm',
+                        idleCard: 'bg-white text-slate-900 border-slate-200 hover:border-emerald-400',
+                        activeIcon: 'bg-emerald-500/20 text-emerald-300',
+                        idleIcon: 'bg-emerald-50 text-emerald-700',
+                        activeBtn: 'bg-emerald-600 text-white hover:bg-emerald-500',
+                        idleBtn: 'bg-emerald-50/80 text-emerald-800 hover:bg-emerald-600 hover:text-white',
+                      },
+                      {
+                        bar: 'bg-amber-500',
+                        activeCard: 'bg-amber-950 text-white border-amber-800 shadow-sm',
+                        idleCard: 'bg-white text-slate-900 border-slate-200 hover:border-amber-400',
+                        activeIcon: 'bg-amber-500/20 text-amber-300',
+                        idleIcon: 'bg-amber-50 text-amber-700',
+                        activeBtn: 'bg-amber-600 text-white hover:bg-amber-500',
+                        idleBtn: 'bg-amber-50/80 text-amber-900 hover:bg-amber-600 hover:text-white',
+                      },
+                      {
+                        bar: 'bg-rose-500',
+                        activeCard: 'bg-rose-950 text-white border-rose-800 shadow-sm',
+                        idleCard: 'bg-white text-slate-900 border-slate-200 hover:border-rose-400',
+                        activeIcon: 'bg-rose-500/20 text-rose-300',
+                        idleIcon: 'bg-rose-50 text-rose-700',
+                        activeBtn: 'bg-rose-600 text-white hover:bg-rose-500',
+                        idleBtn: 'bg-rose-50/80 text-rose-800 hover:bg-rose-600 hover:text-white',
+                      },
+                      {
+                        bar: 'bg-violet-500',
+                        activeCard: 'bg-violet-950 text-white border-violet-800 shadow-sm',
+                        idleCard: 'bg-white text-slate-900 border-slate-200 hover:border-violet-400',
+                        activeIcon: 'bg-violet-500/20 text-violet-300',
+                        idleIcon: 'bg-violet-50 text-violet-700',
+                        activeBtn: 'bg-violet-600 text-white hover:bg-violet-500',
+                        idleBtn: 'bg-violet-50/80 text-violet-800 hover:bg-violet-600 hover:text-white',
+                      },
+                      {
+                        bar: 'bg-cyan-500',
+                        activeCard: 'bg-cyan-950 text-white border-cyan-800 shadow-sm',
+                        idleCard: 'bg-white text-slate-900 border-slate-200 hover:border-cyan-400',
+                        activeIcon: 'bg-cyan-500/20 text-cyan-300',
+                        idleIcon: 'bg-cyan-50 text-cyan-700',
+                        activeBtn: 'bg-cyan-600 text-white hover:bg-cyan-500',
+                        idleBtn: 'bg-cyan-50/80 text-cyan-800 hover:bg-cyan-600 hover:text-white',
+                      },
+                    ];
 
-                      return (
-                        <div
-                          key={tabSheet.id}
-                          onClick={() => {
-                            setSelectedSheetId(tabSheet.id);
-                            resetDynamicForm();
-                          }}
-                          role="button"
-                          tabIndex={0}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter' || e.key === ' ') {
-                              e.preventDefault();
-                              setSelectedSheetId(tabSheet.id);
-                              resetDynamicForm();
-                            }
-                          }}
-                          className={`group relative rounded-xl border p-4 flex flex-col justify-between gap-3 cursor-pointer transition-all ${
-                            isCurrent
-                              ? 'bg-[#0B1B2B] text-white border-[#0B1B2B] shadow-md'
-                              : 'bg-white text-slate-900 border-slate-200 hover:border-teal-600/50 hover:shadow-xs'
-                          }`}
-                        >
-                          {/* Top Row: Sheet Icon + Protected Delete */}
-                          <div className="flex items-start justify-between gap-2">
+                    return (
+                      <div className="p-4 bg-slate-50/60 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-2.5">
+                        {sameWorkbookSheets.map((tabSheet, idx) => {
+                          const isCurrent = tabSheet.id === currentSheet.id;
+                          const tabRowCount =
+                            rowsBySheet[tabSheet.id]?.length ?? 0;
+                          const theme =
+                            SHEET_CARD_THEMES[idx % SHEET_CARD_THEMES.length];
+
+                          return (
                             <div
-                              className={`w-11 h-11 rounded-lg flex items-center justify-center shrink-0 ${
-                                isCurrent
-                                  ? 'bg-teal-500/20 text-teal-300'
-                                  : 'bg-emerald-50 text-emerald-700'
-                              }`}
-                            >
-                              <FileSpreadsheet className="w-6 h-6" />
-                            </div>
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                requestProtectedSheetDelete(tabSheet);
+                              key={tabSheet.id}
+                              onClick={() => {
+                                setSelectedSheetId(tabSheet.id);
+                                resetDynamicForm();
                               }}
-                              title={`Hapus tab ${tabSheet.sheetName}${
-                                pinEnabled ? ' (Dilindungi PIN)' : ''
-                              }`}
-                              aria-label={`Hapus tab ${tabSheet.sheetName}`}
-                              className={`p-1 rounded-md transition-colors ${
-                                isCurrent
-                                  ? 'text-slate-400 hover:text-red-300 hover:bg-white/10'
-                                  : 'text-slate-400 hover:text-red-600 hover:bg-red-50'
+                              role="button"
+                              tabIndex={0}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter' || e.key === ' ') {
+                                  e.preventDefault();
+                                  setSelectedSheetId(tabSheet.id);
+                                  resetDynamicForm();
+                                }
+                              }}
+                              className={`group relative rounded-lg border overflow-hidden flex flex-col justify-between cursor-pointer transition-all ${
+                                isCurrent ? theme.activeCard : theme.idleCard
                               }`}
                             >
-                              <X className="w-3.5 h-3.5" />
-                            </button>
-                          </div>
+                              {/* Subtle top color identifier strip */}
+                              <div className={`h-1 w-full ${theme.bar}`} />
 
-                          {/* Middle: Tab Name & Counts */}
-                          <div className="min-w-0">
-                            <p
-                              className={`text-sm font-semibold truncate ${
-                                isCurrent ? 'text-white' : 'text-slate-900'
-                              }`}
-                            >
-                              {tabSheet.sheetName}
-                            </p>
-                            <p
-                              className={`text-[11px] font-mono tabular-nums mt-0.5 ${
-                                isCurrent ? 'text-slate-300' : 'text-slate-500'
-                              }`}
-                            >
-                              {tabSheet.headers.length} kolom · {tabRowCount}{' '}
-                              baris
-                            </p>
-                          </div>
+                              <div className="p-3 flex flex-col gap-2.5">
+                                {/* Compact Header: Icon + Name/Counts + Delete */}
+                                <div className="flex items-start gap-2">
+                                  <div
+                                    className={`w-8 h-8 rounded-md flex items-center justify-center shrink-0 ${
+                                      isCurrent
+                                        ? theme.activeIcon
+                                        : theme.idleIcon
+                                    }`}
+                                  >
+                                    <FileSpreadsheet className="w-4 h-4" />
+                                  </div>
+                                  <div className="min-w-0 flex-1">
+                                    <p
+                                      className={`text-xs font-semibold truncate ${
+                                        isCurrent
+                                          ? 'text-white'
+                                          : 'text-slate-900'
+                                      }`}
+                                      title={tabSheet.sheetName}
+                                    >
+                                      {tabSheet.sheetName}
+                                    </p>
+                                    <p
+                                      className={`text-[10px] font-mono tabular-nums mt-0.5 truncate ${
+                                        isCurrent
+                                          ? 'text-slate-300'
+                                          : 'text-slate-500'
+                                      }`}
+                                    >
+                                      {tabSheet.headers.length} kol ·{' '}
+                                      {tabRowCount} brs
+                                    </p>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      requestProtectedSheetDelete(tabSheet);
+                                    }}
+                                    title={`Hapus tab ${tabSheet.sheetName}${
+                                      pinEnabled ? ' (Dilindungi PIN)' : ''
+                                    }`}
+                                    aria-label={`Hapus tab ${tabSheet.sheetName}`}
+                                    className={`p-0.5 rounded transition-colors shrink-0 ${
+                                      isCurrent
+                                        ? 'text-slate-400 hover:text-red-300 hover:bg-white/10'
+                                        : 'text-slate-400 hover:text-red-600 hover:bg-red-50'
+                                    }`}
+                                  >
+                                    <X className="w-3 h-3" />
+                                  </button>
+                                </div>
 
-                          {/* Footer: Open Modal Form Button */}
+                                {/* Compact Input Action */}
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    openNewRowModal(tabSheet);
+                                  }}
+                                  className={`w-full inline-flex items-center justify-center gap-1 h-7 text-[11px] font-medium rounded-md transition-colors whitespace-nowrap ${
+                                    isCurrent ? theme.activeBtn : theme.idleBtn
+                                  }`}
+                                >
+                                  <Plus className="w-3 h-3" />
+                                  Input Data
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+
+                        {unopenedDiscoveredTabs.map((tabName) => (
                           <button
+                            key={tabName}
                             type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              openNewRowModal(tabSheet);
-                            }}
-                            className={`w-full inline-flex items-center justify-center gap-1.5 h-8 text-xs font-medium rounded-md transition-colors ${
-                              isCurrent
-                                ? 'bg-teal-600 text-white hover:bg-teal-500'
-                                : 'bg-slate-100 text-slate-800 hover:bg-[#0B1B2B] hover:text-white'
-                            }`}
+                            disabled={loadingNewTab}
+                            onClick={() => handleLoadWorkbookTab(tabName)}
+                            className="rounded-lg border border-dashed border-teal-500/70 bg-teal-50/40 hover:bg-teal-50 p-3 flex flex-col items-center justify-center text-center gap-1.5 transition-colors min-h-[96px]"
                           >
-                            <Plus className="w-3.5 h-3.5" />
-                            Input Data
+                            <div className="w-7 h-7 rounded-md bg-teal-100 text-teal-700 flex items-center justify-center">
+                              <Plus className="w-4 h-4" />
+                            </div>
+                            <div className="min-w-0 w-full">
+                              <p className="text-[11px] font-semibold font-mono text-teal-900 truncate">
+                                {tabName}
+                              </p>
+                              <p className="text-[10px] text-teal-700">
+                                Muat tab
+                              </p>
+                            </div>
                           </button>
-                        </div>
-                      );
-                    })}
-
-                    {unopenedDiscoveredTabs.map((tabName) => (
-                      <button
-                        key={tabName}
-                        type="button"
-                        disabled={loadingNewTab}
-                        onClick={() => handleLoadWorkbookTab(tabName)}
-                        className="rounded-xl border border-dashed border-teal-500/70 bg-teal-50/50 hover:bg-teal-50 p-4 flex flex-col items-center justify-center text-center gap-2 transition-colors min-h-[148px]"
-                      >
-                        <div className="w-10 h-10 rounded-lg bg-teal-100 text-teal-700 flex items-center justify-center">
-                          <Plus className="w-5 h-5" />
-                        </div>
-                        <div>
-                          <p className="text-xs font-semibold font-mono text-teal-900">
-                            {tabName}
-                          </p>
-                          <p className="text-[11px] text-teal-700 mt-0.5">
-                            Klik untuk muat tab
-                          </p>
-                        </div>
-                      </button>
-                    ))}
-                  </div>
+                        ))}
+                      </div>
+                    );
+                  })()}
                 </section>
 
                 {/* Grafik Bar & Grafik Donut Real-Time Sheet OPD */}
