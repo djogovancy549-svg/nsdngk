@@ -1,5 +1,11 @@
 import React, { useState } from 'react';
-import { AlertTriangle, LogIn, ShieldCheck, UserPlus } from 'lucide-react';
+import {
+  AlertTriangle,
+  BookOpen,
+  LogIn,
+  ShieldCheck,
+  UserPlus,
+} from 'lucide-react';
 import { OPD_DIRECTORY } from '../config/opdSheets';
 import {
   AiIntrusionWarning,
@@ -15,6 +21,7 @@ import {
 } from '../types/satuData';
 import { RegencyWhiteLabelConfig } from '../services/regencyConfigService';
 import { HeroBannerSlider } from './HeroBannerSlider';
+import { PortalGuideView } from './PortalGuideView';
 import { RunningSummaryTicker } from './RunningSummaryTicker';
 
 function generateDynamicChallenge() {
@@ -57,7 +64,7 @@ export function AuthGateView({
   onLogin,
   onRegister,
 }: AuthGateViewProps) {
-  const [mode, setMode] = useState<'login' | 'register'>('login');
+  const [mode, setMode] = useState<'login' | 'register' | 'guide'>('login');
 
   // Login state
   const [loginRole, setLoginRole] = useState<'opd' | 'super_admin'>('opd');
@@ -318,13 +325,41 @@ export function AuthGateView({
           >
             Daftar Akun Dinas
           </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mode === 'guide'}
+            onClick={() => setMode('guide')}
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded transition-colors whitespace-nowrap ${
+              mode === 'guide'
+                ? 'bg-teal-700 text-white shadow-xs'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <BookOpen className="w-3.5 h-3.5" />
+            Panduan
+          </button>
         </div>
       </header>
 
       <main className="flex-1 w-full max-w-[1280px] mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8 space-y-6">
-        <HeroBannerSlider />
+        {mode === 'guide' ? (
+          <PortalGuideView
+            regencyConfig={regencyConfig}
+            onGoToLogin={() => {
+              setMode('login');
+              setLoginError(null);
+            }}
+            onGoToRegister={() => {
+              setMode('register');
+              setRegFeedback(null);
+            }}
+          />
+        ) : (
+          <>
+            <HeroBannerSlider />
 
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
           {/* Left: Sovereign Data Architecture Overview */}
           <div className="lg:col-span-7 bg-white border border-slate-200 rounded-lg p-6 space-y-5">
             <div>
@@ -376,15 +411,20 @@ export function AuthGateView({
               </div>
             </div>
 
-            <div className="pt-4 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
+            <div className="pt-4 border-t border-slate-200 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-500">
               <span className="inline-flex items-center gap-1.5">
                 <ShieldCheck className="w-3.5 h-3.5 text-teal-700 shrink-0" />
                 Dilindungi enkripsi SHA-256, proteksi brute-force &amp; audit AI
                 keamanan siber.
               </span>
-              <span className="text-[11px] text-slate-400">
-                Akses Walidata terbatas untuk administrator resmi.
-              </span>
+              <button
+                type="button"
+                onClick={() => setMode('guide')}
+                className="inline-flex items-center gap-1.5 text-xs font-medium text-teal-700 hover:text-teal-900 underline decoration-teal-300"
+              >
+                <BookOpen className="w-3.5 h-3.5" />
+                Baca Panduan Super Admin &amp; User OPD
+              </button>
             </div>
           </div>
 
@@ -773,6 +813,8 @@ export function AuthGateView({
             )}
           </div>
         </div>
+          </>
+        )}
       </main>
     </div>
   );
