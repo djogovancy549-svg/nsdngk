@@ -1,15 +1,19 @@
 import { useState } from 'react';
 import {
+  Award,
   BookOpen,
   Building2,
   CheckCircle2,
+  Cpu,
   Database,
   FileSpreadsheet,
   FolderTree,
   Layers,
+  Lock,
   LogIn,
   ShieldCheck,
   UserPlus,
+  Zap,
 } from 'lucide-react';
 import { RegencyWhiteLabelConfig } from '../services/regencyConfigService';
 
@@ -19,14 +23,14 @@ interface PortalGuideViewProps {
   onGoToRegister: () => void;
 }
 
-type GuideTab = 'opd' | 'superadmin' | 'wilayah';
+type GuideTab = 'keunggulan' | 'opd' | 'superadmin' | 'wilayah';
 
 export function PortalGuideView({
   regencyConfig,
   onGoToLogin,
   onGoToRegister,
 }: PortalGuideViewProps) {
-  const [activeTab, setActiveTab] = useState<GuideTab>('opd');
+  const [activeTab, setActiveTab] = useState<GuideTab>('keunggulan');
 
   return (
     <div className="space-y-6">
@@ -77,16 +81,31 @@ export function PortalGuideView({
 
       {/* Role Switcher Tabs */}
       <div
-        className="grid grid-cols-1 sm:grid-cols-3 gap-2 p-1.5 bg-slate-200/70 rounded-lg"
+        className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2 p-1.5 bg-slate-200/70 rounded-lg"
         role="tablist"
         aria-label="Kategori panduan"
       >
         <button
           type="button"
           role="tab"
+          aria-selected={activeTab === 'keunggulan'}
+          onClick={() => setActiveTab('keunggulan')}
+          className={`flex items-center justify-center gap-2 h-10 px-3 text-xs font-semibold rounded-md transition-colors ${
+            activeTab === 'keunggulan'
+              ? 'bg-teal-700 text-white shadow-xs'
+              : 'text-slate-600 hover:text-slate-900'
+          }`}
+        >
+          <Award className="w-4 h-4 shrink-0" />
+          Keunggulan Sistem
+        </button>
+
+        <button
+          type="button"
+          role="tab"
           aria-selected={activeTab === 'opd'}
           onClick={() => setActiveTab('opd')}
-          className={`flex items-center justify-center gap-2 h-10 px-4 text-xs font-semibold rounded-md transition-colors ${
+          className={`flex items-center justify-center gap-2 h-10 px-3 text-xs font-semibold rounded-md transition-colors ${
             activeTab === 'opd'
               ? 'bg-white text-slate-900 shadow-xs'
               : 'text-slate-600 hover:text-slate-900'
@@ -101,14 +120,14 @@ export function PortalGuideView({
           role="tab"
           aria-selected={activeTab === 'superadmin'}
           onClick={() => setActiveTab('superadmin')}
-          className={`flex items-center justify-center gap-2 h-10 px-4 text-xs font-semibold rounded-md transition-colors ${
+          className={`flex items-center justify-center gap-2 h-10 px-3 text-xs font-semibold rounded-md transition-colors ${
             activeTab === 'superadmin'
               ? 'bg-[#0B1B2B] text-white shadow-xs'
               : 'text-slate-600 hover:text-slate-900'
           }`}
         >
           <ShieldCheck className="w-4 h-4 text-teal-400 shrink-0" />
-          Panduan Super Admin (Walidata)
+          Panduan Super Admin
         </button>
 
         <button
@@ -116,16 +135,108 @@ export function PortalGuideView({
           role="tab"
           aria-selected={activeTab === 'wilayah'}
           onClick={() => setActiveTab('wilayah')}
-          className={`flex items-center justify-center gap-2 h-10 px-4 text-xs font-semibold rounded-md transition-colors ${
+          className={`flex items-center justify-center gap-2 h-10 px-3 text-xs font-semibold rounded-md transition-colors ${
             activeTab === 'wilayah'
               ? 'bg-white text-slate-900 shadow-xs'
               : 'text-slate-600 hover:text-slate-900'
           }`}
         >
           <FolderTree className="w-4 h-4 text-teal-700 shrink-0" />
-          Standar Sheet 20 Tahun (Desa / Kecamatan)
+          Standar Sheet 20 Tahun
         </button>
       </div>
+
+      {/* TAB 0: KEUNGGULAN SISTEM (FOKUS KEUNGGULAN INTERNAL & KEDAULATAN DAERAH) */}
+      {activeTab === 'keunggulan' && (
+        <div className="space-y-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {[
+              {
+                icon: ShieldCheck,
+                title: 'Kedaulatan Data Penuh di Kabupaten & OPD',
+                desc: 'Seluruh berkas dan tabel mentah tetap tersimpan di Google Drive & Google Sheet milik masing-masing OPD. Walidata hanya membaca secara read-only dan mengkloning data terpilih untuk publikasi.',
+              },
+              {
+                icon: FileSpreadsheet,
+                title: 'Form, Tabel & Grafik Terbentuk Otomatis',
+                desc: 'Cukup susun atau ubah nama kolom di Header Baris 1 Google Sheet OPD—formulir input, validasi tipe data, tabel, dan grafik interaktif (Bar, Donat, Garis + Cross-Filter) langsung menyesuaikan tanpa ubah kode.',
+              },
+              {
+                icon: Zap,
+                title: 'Performa Cepat dengan Smart Cache Server',
+                desc: 'Dilengkapi Proxy Backend dengan Smart Cache 45 detik dan penggabungan permintaan serentak (deduplication), sehingga pembacaan data berulang berlangsung dalam hitungan milidetik dan hemat kuota Google.',
+              },
+              {
+                icon: Lock,
+                title: 'Keamanan Siber Berlapis & Audit AI',
+                desc: 'Menggabungkan WAF 10 lapis, sesi HttpOnly HMAC-SHA256, Email Allowlist Super Admin, Kunci Rahasia Webhook (API_SECRET) anti-SSRF, perangkap Honeypot, serta deteksi anomali berbasis AI.',
+              },
+              {
+                icon: FolderTree,
+                title: 'Siap 20 Tahun dengan Partisi Wilayah',
+                desc: 'Mendukung pembagian sheet per OPD, Kecamatan, Desa/Kelurahan, dan periode tahun sehingga setiap file tetap ringan, terisolasi dari kesalahan lintas unit, dan sangat hemat anggaran infrastruktur daerah.',
+              },
+              {
+                icon: Cpu,
+                title: 'White-Label & Siap Naik Kelas ke BigQuery',
+                desc: 'Identitas daerah (Nama Kabupaten, Portal, Walidata, Kecamatan, tautan Portal Publik) dapat diatur langsung dari dashboard, serta sudah memiliki konektor resmi Google BigQuery (region Jakarta) untuk analitik skala besar.',
+              },
+            ].map((card) => {
+              const Icon = card.icon;
+              return (
+                <div
+                  key={card.title}
+                  className="bg-white border border-slate-200 rounded-lg p-5 space-y-3"
+                >
+                  <div className="w-9 h-9 rounded-md bg-[#0B1B2B] text-teal-400 flex items-center justify-center">
+                    <Icon className="w-4 h-4" />
+                  </div>
+                  <h2 className="text-sm font-semibold text-slate-900">
+                    {card.title}
+                  </h2>
+                  <p className="text-xs text-slate-600 leading-relaxed">
+                    {card.desc}
+                  </p>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="bg-[#0B1B2B] text-slate-100 rounded-lg p-6 grid grid-cols-1 lg:grid-cols-12 gap-5 items-center">
+            <div className="lg:col-span-8 space-y-1.5">
+              <p className="text-xs font-medium text-teal-300">
+                Arsitektur Pragmatis, Hemat Anggaran &amp; Berkelanjutan
+              </p>
+              <h3 className="text-base font-semibold text-white">
+                Dirancang Khusus untuk Kemudahan Input OPD dan Ketahanan Jangka
+                Panjang Daerah
+              </h3>
+              <p className="text-xs text-slate-300 leading-relaxed">
+                Sistem ini memfokuskan diri sebagai pusat pengumpulan, validasi,
+                dan analitik data sektoral internal OPD yang adaptif, sementara
+                publikasi terbuka masyarakat dapat tetap berjalan pada portal
+                publik terpisah milik daerah.
+              </p>
+            </div>
+            <div className="lg:col-span-4 flex flex-wrap lg:justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setActiveTab('opd')}
+                className="h-9 px-3.5 text-xs font-semibold text-slate-950 bg-teal-400 rounded-md hover:bg-teal-300"
+              >
+                Lihat Panduan OPD
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveTab('superadmin')}
+                className="h-9 px-3.5 text-xs font-medium text-white bg-white/10 border border-white/20 rounded-md hover:bg-white/20"
+              >
+                Lihat Panduan Admin
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* TAB 1: PANDUAN USER / OPD */}
       {activeTab === 'opd' && (
