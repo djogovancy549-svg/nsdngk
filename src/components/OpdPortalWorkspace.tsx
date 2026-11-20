@@ -1300,6 +1300,62 @@ export function OpdPortalWorkspace({
               </button>
             </div>
 
+            {/* Teks Berjalan Informatif Khusus Formulir Dinamis */}
+            {(() => {
+              const filledNow = currentSheet.headers.filter(
+                (h) => (formValues[h] ?? '').trim().length > 0
+              ).length;
+              const pctNow =
+                currentSheet.headers.length > 0
+                  ? Math.round((filledNow / currentSheet.headers.length) * 100)
+                  : 0;
+              const tickerMessages = [
+                `Dataset Aktif: ${currentSheet.judulDataset} (Tab ${currentSheet.sheetName})`,
+                `Kedaulatan Data: ${session.namaOpd} · ${currentRows.length.toLocaleString('id-ID')} baris tersimpan`,
+                `Struktur Otomatis (${currentSheet.headers.length} kolom): ${
+                  currentSheet.headers.join(', ') || 'Belum terdeteksi'
+                }`,
+                `Progres Isian: ${filledNow}/${currentSheet.headers.length} kolom (${pctNow}%)`,
+                `Panduan Entri: Periksa kembali ejaan nama, nomor HP, dan tanggal sebelum klik Simpan ke Google Sheet`,
+                `Keamanan Aktif: Setiap isian otomatis disanitasi dari XSS & Injeksi Formula Google Sheets`,
+              ];
+              const renderFormTickerTrack = (prefix: string) => (
+                <div className="flex items-center shrink-0">
+                  {tickerMessages.map((msg, idx) => (
+                    <span
+                      key={`${prefix}-${idx}`}
+                      className="inline-flex items-center text-[11px] text-slate-200 whitespace-nowrap"
+                    >
+                      <span className="font-medium tracking-wide">{msg}</span>
+                      <span
+                        className="mx-4 text-teal-400/70"
+                        aria-hidden="true"
+                      >
+                        ·
+                      </span>
+                    </span>
+                  ))}
+                </div>
+              );
+
+              return (
+                <div
+                  aria-label="Informasi panduan formulir berjalan"
+                  className="w-full bg-slate-900 border-b border-slate-800 overflow-hidden h-8 flex items-center shrink-0"
+                >
+                  <div className="px-3.5 h-full bg-teal-700 text-white text-[11px] font-semibold tracking-wide flex items-center shrink-0 whitespace-nowrap z-10">
+                    Info Entri
+                  </div>
+                  <div className="flex-1 overflow-hidden">
+                    <div className="animate-marquee">
+                      {renderFormTickerTrack('fa')}
+                      {renderFormTickerTrack('fb')}
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+
             {currentSheet.headers.length === 0 ? (
               <div className="p-12 text-center space-y-3">
                 <p className="text-sm font-semibold text-slate-900">
