@@ -32,8 +32,9 @@ interface AuthGateViewProps {
   sheets: OpdDynamicSheet[];
   rowsBySheet: Record<string, DynamicSheetRow[]>;
   onLogin: (
-    identifier: string,
-    password: string
+    email: string,
+    password: string,
+    loginRole: 'opd' | 'super_admin'
   ) => Promise<{ ok: boolean; message?: string }>;
   onRegister: (input: {
     opdId: string;
@@ -56,6 +57,7 @@ export function AuthGateView({
   const [mode, setMode] = useState<'login' | 'register'>('login');
 
   // Login state
+  const [loginRole, setLoginRole] = useState<'opd' | 'super_admin'>('opd');
   const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
   const [honeypotTrap, setHoneypotTrap] = useState('');
@@ -166,7 +168,7 @@ export function AuthGateView({
         );
       }
 
-      const res = await onLogin(identifier, password);
+      const res = await onLogin(identifier, password, loginRole);
       if (!res.ok) {
         const nextFail = failedCount + 1;
         setFailedCount(nextFail);
@@ -240,7 +242,8 @@ export function AuthGateView({
       });
       if (res.ok) {
         setRegFeedback({ type: 'success', text: res.message });
-        setIdentifier(username.trim().toLowerCase());
+        setLoginRole('opd');
+        setIdentifier(email.trim().toLowerCase());
         setPassword('');
         setNamaLengkap('');
         setEmail('');
@@ -386,13 +389,56 @@ export function AuthGateView({
           <div className="lg:col-span-5 bg-white border border-slate-200 rounded-lg p-6">
             {mode === 'login' ? (
               <form onSubmit={handleLoginSubmit} className="space-y-4">
-                <div className="pb-3 border-b border-slate-200">
-                  <h2 className="text-base font-semibold text-slate-900">
-                    Masuk ke Portal Satu Data
-                  </h2>
-                  <p className="text-xs text-slate-500 mt-0.5">
-                    Masuk sebagai Super Admin Walidata atau Operator Dinas/OPD.
-                  </p>
+                <div className="pb-3 border-b border-slate-200 space-y-3">
+                  <div>
+                    <h2 className="text-base font-semibold text-slate-900">
+                      Masuk ke Portal Satu Data
+                    </h2>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      {loginRole === 'super_admin'
+                        ? 'Khusus email resmi yang terdaftar pada daftar putih Super Admin.'
+                        : 'Wajib menggunakan email User / OPD yang telah didaftarkan.'}
+                    </p>
+                  </div>
+
+                  <div
+                    className="grid grid-cols-2 gap-1 p-1 bg-slate-100 rounded-md"
+                    role="tablist"
+                    aria-label="Jenis akun masuk"
+                  >
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={loginRole === 'opd'}
+                      onClick={() => {
+                        setLoginRole('opd');
+                        setLoginError(null);
+                      }}
+                      className={`h-8 text-xs font-medium rounded transition-colors ${
+                        loginRole === 'opd'
+                          ? 'bg-white text-slate-900 shadow-xs'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      User / OPD
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={loginRole === 'super_admin'}
+                      onClick={() => {
+                        setLoginRole('super_admin');
+                        setLoginError(null);
+                      }}
+                      className={`h-8 text-xs font-medium rounded transition-colors ${
+                        loginRole === 'super_admin'
+                          ? 'bg-[#0B1B2B] text-white shadow-xs'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      Super Admin
+                    </button>
+                  </div>
                 </div>
 
                 {aiWarning && (
@@ -438,17 +484,28 @@ export function AuthGateView({
                     htmlFor="login-identifier"
                     className="block text-xs font-medium text-slate-700 mb-1.5"
                   >
-                    Username atau Email
+                    {loginRole === 'super_admin'
+                      ? 'Email Resmi Super Admin'
+                      : 'Email Terdaftar User / OPD'}
                   </label>
                   <input
                     id="login-identifier"
-                    type="text"
+                    type="email"
                     value={identifier}
                     onChange={(e) => setIdentifier(e.target.value)}
-                    placeholder="Masukkan username atau email terdaftar"
+                    placeholder={
+                      loginRole === 'super_admin'
+                        ? 'walidata@nagekeokab.go.id'
+                        : 'nama.opd@nagekeokab.go.id'
+                    }
                     className="w-full h-10 px-3 text-sm bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
                     required
                   />
+                  <p className="mt-1 text-[11px] text-slate-500">
+                    {loginRole === 'super_admin'
+                      ? 'Tidak semua email dapat masuk. Hanya email yang didaftarkan di daftar resmi Super Admin.'
+                      : 'Akun User/OPD hanya dapat dibuka dengan alamat email yang sudah didaftarkan.'}
+                  </p>
                 </div>
 
                 <div>

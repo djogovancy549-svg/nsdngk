@@ -257,8 +257,12 @@ export default function App() {
   };
 
   // Auth Handlers
-  const handleLogin = async (identifier: string, password: string) => {
-    const result = await authenticateUser(identifier, password, accounts);
+  const handleLogin = async (
+    email: string,
+    password: string,
+    loginRole: 'opd' | 'super_admin'
+  ) => {
+    const result = await authenticateUser(email, password, accounts, loginRole);
     if (result.ok && result.session) {
       setSession(result.session);
       saveSession(result.session);
@@ -1275,6 +1279,7 @@ export default function App() {
 
           {activeSection === 'akun_sheet' && (
             <AkunOpdView
+              currentSuperAdminEmail={session.email}
               accounts={accounts}
               sheets={sheets}
               syncingAccounts={syncingAccounts}

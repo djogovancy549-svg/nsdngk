@@ -21,6 +21,226 @@ import { extractGoogleSheetId } from './dynamicSheetService';
 const ACCOUNTS_STORAGE_KEY = 'satu_data_nagekeo_accounts_v3';
 const SESSION_STORAGE_KEY = 'satu_data_nagekeo_session_v3';
 const AUTH_CONFIG_STORAGE_KEY = 'satu_data_nagekeo_auth_sheet_cfg_v3';
+const SUPER_ADMIN_ALLOWLIST_STORAGE_KEY =
+  'satu_data_nagekeo_superadmin_emails_v1';
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+export function isValidEmailAddress(value: string): boolean {
+  return EMAIL_REGEX.test(value.trim().toLowerCase());
+}
+
+export function loadCachedSuperAdminAllowedEmails(): string[] {
+  const primary = SUPER_ADMIN_RESERVED_IDENTIFIERS.email.trim().toLowerCase();
+  try {
+    const raw = localStorage.getItem(SUPER_ADMIN_ALLOWLIST_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        const cleaned = parsed
+          .map((e) => String(e).trim().toLowerCase())
+          .filter((e) => EMAIL_REGEX.test(e));
+        return Array.from(new Set([primary, ...cleaned]));
+      }
+    }
+  } catch {
+    // Abaikan
+  }
+  return [primary];
+}
+
+export function saveCachedSuperAdminAllowedEmails(emails: string[]): string[] {
+  const primary = SUPER_ADMIN_RESERVED_IDENTIFIERS.email.trim().toLowerCase();
+  const normalized = Array.from(
+    new Set([
+      primary,
+      ...emails
+        .map((e) => String(e).trim().toLowerCase())
+        .filter((e) => EMAIL_REGEX.test(e)),
+    ])
+  );
+  try {
+    localStorage.setItem(
+      SUPER_ADMIN_ALLOWLIST_STORAGE_KEY,
+      JSON.stringify(normalized)
+    );
+  } catch {
+    // Abaikan
+  }
+  return normalized;
+}
+
+export async function fetchSuperAdminAllowedEmails(
+  actorEmail: string
+): Promise<{
+  ok: boolean;
+  primaryEmail: string;
+  allowedEmails: string[];
+  message?: string;
+}> {
+  const primaryDefault = SUPER_ADMIN_RESERVED_IDENTIFIERS.email
+    .trim()
+    .toLowerCase();
+  try {
+    const res = await fetch('/api/auth/superadmin/allowlist', {
+      method: 'GET',
+      headers: {
+        Accept: 'application/json',
+        'x-superadmin-email': actorEmail.trim().toLowerCase(),
+      },
+    });
+    const contentType = res.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      const data = await res.json();
+      if (res.ok && data.ok && Array.isArray(data.allowedEmails)) {
+        const saved = saveCachedSuperAdminAllowedEmails(data.allowedEmails);
+        return {
+          ok: true,
+          primaryEmail: String(data.primaryEmail || primaryDefault),
+          allowedEmails: saved,
+        };
+      }
+      return {
+        ok: false,
+        primaryEmail: primaryDefault,
+        allowedEmails: loadCachedSuperAdminAllowedEmails(),
+        message: data?.message || 'Gagal memuat daftar email Super Admin.',
+      };
+    }
+  } catch {
+    // Fallback ke cache lokal
+  }
+  return {
+    ok: true,
+    primaryEmail: primaryDefault,
+    allowedEmails: loadCachedSuperAdminAllowedEmails(),
+  };
+}
+
+export async function addSuperAdminAllowedEmail(
+  actorEmail: string,
+  newEmail: string
+): Promise<{
+  ok: boolean;
+  allowedEmails: string[];
+  message: string;
+}> {
+  const cleanEmail = newEmail.trim().toLowerCase();
+  if (!isValidEmailAddress(cleanEmail)) {
+    return {
+      ok: false,
+      allowedEmails: loadCachedSuperAdminAllowedEmails(),
+      message: 'Format alamat email tidak valid.',
+    };
+  }
+
+  try {
+    const res = await fetch('/api/auth/superadmin/allowlist', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-superadmin-email': actorEmail.trim().toLowerCase(),
+      },
+      body: JSON.stringify({ email: cleanEmail }),
+    });
+    const contentType = res.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      const data = await res.json();
+      if (res.ok && data.ok && Array.isArray(data.allowedEmails)) {
+        const saved = saveCachedSuperAdminAllowedEmails(data.allowedEmails);
+        return {
+          ok: true,
+          allowedEmails: saved,
+          message:
+            data.message ||
+            `Email ${cleanEmail} berhasil didaftarkan sebagai Super Admin.`,
+        };
+      }
+      return {
+        ok: false,
+        allowedEmails: loadCachedSuperAdminAllowedEmails(),
+        message: data?.message || 'Gagal mendaftarkan email Super Admin.',
+      };
+    }
+  } catch {
+    // Fallback lokal jika server belum terjangkau
+  }
+
+  const current = loadCachedSuperAdminAllowedEmails();
+  if (current.includes(cleanEmail)) {
+    return {
+      ok: false,
+      allowedEmails: current,
+      message: `Email ${cleanEmail} sudah terdaftar sebagai Super Admin.`,
+    };
+  }
+  const saved = saveCachedSuperAdminAllowedEmails([...current, cleanEmail]);
+  return {
+    ok: true,
+    allowedEmails: saved,
+    message: `Email ${cleanEmail} berhasil didaftarkan untuk akses Super Admin.`,
+  };
+}
+
+export async function removeSuperAdminAllowedEmail(
+  actorEmail: string,
+  targetEmail: string
+): Promise<{
+  ok: boolean;
+  allowedEmails: string[];
+  message: string;
+}> {
+  const cleanTarget = targetEmail.trim().toLowerCase();
+  const primary = SUPER_ADMIN_RESERVED_IDENTIFIERS.email.trim().toLowerCase();
+  if (cleanTarget === primary) {
+    return {
+      ok: false,
+      allowedEmails: loadCachedSuperAdminAllowedEmails(),
+      message: 'Email utama Super Admin tidak dapat dihapus.',
+    };
+  }
+
+  try {
+    const res = await fetch('/api/auth/superadmin/allowlist', {
+      method: 'DELETE',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-superadmin-email': actorEmail.trim().toLowerCase(),
+      },
+      body: JSON.stringify({ email: cleanTarget }),
+    });
+    const contentType = res.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      const data = await res.json();
+      if (res.ok && data.ok && Array.isArray(data.allowedEmails)) {
+        const saved = saveCachedSuperAdminAllowedEmails(data.allowedEmails);
+        return {
+          ok: true,
+          allowedEmails: saved,
+          message:
+            data.message ||
+            `Akses Super Admin untuk ${cleanTarget} berhasil dicabut.`,
+        };
+      }
+      return {
+        ok: false,
+        allowedEmails: loadCachedSuperAdminAllowedEmails(),
+        message: data?.message || 'Gagal mencabut akses email Super Admin.',
+      };
+    }
+  } catch {
+    // Fallback lokal
+  }
+
+  const next = loadCachedSuperAdminAllowedEmails().filter(
+    (e) => e !== cleanTarget
+  );
+  const saved = saveCachedSuperAdminAllowedEmails(next);
+  return {
+    ok: true,
+    allowedEmails: saved,
+    message: `Akses Super Admin untuk ${cleanTarget} berhasil dicabut.`,
+  };
+}
 
 export function getActiveAuthSheetConfig(): AuthSheetConfig {
   try {
@@ -292,14 +512,25 @@ export async function registerOpdAccount(
     };
   }
 
+  if (!isValidEmailAddress(cleanEmail)) {
+    return {
+      ok: false,
+      syncedToSheet: false,
+      message: 'Format alamat email OPD tidak valid.',
+    };
+  }
+
+  const allowedSuperAdminEmails = loadCachedSuperAdminAllowedEmails();
   if (
     cleanUsername === SUPER_ADMIN_RESERVED_IDENTIFIERS.username ||
-    cleanEmail === SUPER_ADMIN_RESERVED_IDENTIFIERS.email
+    cleanEmail === SUPER_ADMIN_RESERVED_IDENTIFIERS.email ||
+    allowedSuperAdminEmails.includes(cleanEmail)
   ) {
     return {
       ok: false,
       syncedToSheet: false,
-      message: 'Username atau email tersebut sudah digunakan oleh sistem.',
+      message:
+        'Username atau email tersebut sudah terdaftar khusus untuk akses Super Admin.',
     };
   }
 
@@ -486,9 +717,21 @@ export interface LoginResult {
 export async function authenticateUser(
   identifier: string,
   password: string,
-  accounts: OpdAccount[]
+  accounts: OpdAccount[],
+  loginRole: 'opd' | 'super_admin' = 'opd'
 ): Promise<LoginResult> {
-  const cleanId = identifier.trim().toLowerCase();
+  const cleanEmail = identifier.trim().toLowerCase();
+
+  // Wajib menggunakan alamat email yang valid (tidak menerima akses bebas tanpa email terdaftar)
+  if (!isValidEmailAddress(cleanEmail)) {
+    return {
+      ok: false,
+      message:
+        loginRole === 'super_admin'
+          ? 'Masukkan alamat email resmi Super Admin yang terdaftar.'
+          : 'Masukkan alamat email yang sudah didaftarkan untuk akun User/OPD Anda.',
+    };
+  }
 
   // Cek proteksi brute-force klien
   const guard = getLoginGuardStatus();
@@ -499,52 +742,76 @@ export async function authenticateUser(
     };
   }
 
-  // 1. Verifikasi Super Admin di server (kredensial plaintext tidak pernah ada di klien)
-  let serverHandled = false;
-  try {
-    const serverRes = await fetch('/api/auth/superadmin', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ identifier: cleanId, password }),
-    });
+  // 1. Jalur Khusus Super Admin — HANYA terbuka untuk email dalam daftar putih resmi Super Admin
+  if (loginRole === 'super_admin') {
+    let serverHandled = false;
+    try {
+      const serverRes = await fetch('/api/auth/superadmin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          identifier: cleanEmail,
+          password,
+          loginRole: 'super_admin',
+        }),
+      });
 
-    const contentType = serverRes.headers.get('content-type') || '';
-    if (contentType.includes('application/json')) {
-      if (serverRes.status === 429) {
-        const data = await serverRes.json();
-        appendSecurityEvent({
-          kategori: 'Brute Force',
-          tingkat: 'Kritis',
-          aktor: cleanId || 'Anonim',
-          target: 'Autentikasi Super Admin',
-          detail:
-            data?.message ||
-            'Server memblokir upaya brute-force pada akun Super Admin.',
-          diblokir: true,
-        });
-        return {
-          ok: false,
-          message:
-            data?.message ||
-            'Terlalu banyak percobaan gagal. Akses dikunci oleh server.',
-        };
-      }
-
-      if (serverRes.ok || serverRes.status === 401) {
-        const data = await serverRes.json();
-        serverHandled = true;
-        if (data.ok && data.session) {
-          resetLoginGuard();
+      const contentType = serverRes.headers.get('content-type') || '';
+      if (contentType.includes('application/json')) {
+        if (serverRes.status === 429) {
+          const data = await serverRes.json();
+          appendSecurityEvent({
+            kategori: 'Brute Force',
+            tingkat: 'Kritis',
+            aktor: cleanEmail,
+            target: 'Autentikasi Super Admin',
+            detail:
+              data?.message ||
+              'Server memblokir upaya brute-force pada akun Super Admin.',
+            diblokir: true,
+          });
           return {
-            ok: true,
-            session: data.session as UserSession,
+            ok: false,
+            message:
+              data?.message ||
+              'Terlalu banyak percobaan gagal. Akses dikunci oleh server.',
           };
         }
-        if (data.isSuperAdminCandidate) {
+
+        if (serverRes.status === 403) {
+          const data = await serverRes.json();
           appendSecurityEvent({
             kategori: 'Login Gagal',
             tingkat: 'Tinggi',
-            aktor: cleanId,
+            aktor: cleanEmail,
+            target: 'Gerbang Super Admin (Email Allowlist)',
+            detail:
+              data?.message ||
+              `Email ${cleanEmail} ditolak karena tidak termasuk dalam daftar email resmi Super Admin.`,
+            diblokir: true,
+          });
+          return {
+            ok: false,
+            message:
+              data?.message ||
+              'Akses Super Admin ditolak. Email ini tidak terdaftar dalam daftar email resmi Super Admin.',
+          };
+        }
+
+        if (serverRes.ok || serverRes.status === 401) {
+          const data = await serverRes.json();
+          serverHandled = true;
+          if (data.ok && data.session) {
+            resetLoginGuard();
+            return {
+              ok: true,
+              session: data.session as UserSession,
+            };
+          }
+          appendSecurityEvent({
+            kategori: 'Login Gagal',
+            tingkat: 'Tinggi',
+            aktor: cleanEmail,
             target: 'Autentikasi Super Admin',
             detail:
               data?.message ||
@@ -553,87 +820,99 @@ export async function authenticateUser(
           });
           return {
             ok: false,
-            message: data?.message || 'Kredensial tidak sesuai.',
+            message: data?.message || 'Kata sandi Super Admin tidak sesuai.',
           };
         }
       }
+    } catch {
+      // Endpoint server tidak terjangkau (misal mode statis / restart)
     }
-  } catch {
-    // Endpoint server tidak terjangkau (misal mode statis / restart)
-  }
 
-  // Fallback verifikasi hash SHA-256 (tanpa plaintext) jika endpoint /api/auth/superadmin tidak terjangkau
-  if (
-    !serverHandled &&
-    (cleanId === SUPER_ADMIN_RESERVED_IDENTIFIERS.username ||
-      cleanId === SUPER_ADMIN_RESERVED_IDENTIFIERS.email)
-  ) {
-    const SUPER_ADMIN_SHA256 =
-      '96a2c0e63ea4bf155d594b9ae9e69e8ed88bf6f3916fe96da1358fea81b6d7d8';
-    const rawHash = await hashPassword(password);
-    const trimmedHash = await hashPassword(password.trim());
-    if (rawHash === SUPER_ADMIN_SHA256 || trimmedHash === SUPER_ADMIN_SHA256) {
-      resetLoginGuard();
+    // Fallback verifikasi hash SHA-256 (tanpa plaintext) & email allowlist lokal
+    if (!serverHandled) {
+      const allowedEmails = loadCachedSuperAdminAllowedEmails();
+      if (!allowedEmails.includes(cleanEmail)) {
+        appendSecurityEvent({
+          kategori: 'Login Gagal',
+          tingkat: 'Tinggi',
+          aktor: cleanEmail,
+          target: 'Gerbang Super Admin (Email Allowlist)',
+          detail: `Email ${cleanEmail} ditolak karena tidak termasuk dalam daftar email resmi Super Admin.`,
+          diblokir: true,
+        });
+        return {
+          ok: false,
+          message:
+            'Akses Super Admin ditolak. Email ini tidak terdaftar dalam daftar email resmi Super Admin.',
+        };
+      }
+
+      const SUPER_ADMIN_SHA256 =
+        '96a2c0e63ea4bf155d594b9ae9e69e8ed88bf6f3916fe96da1358fea81b6d7d8';
+      const rawHash = await hashPassword(password);
+      const trimmedHash = await hashPassword(password.trim());
+      if (rawHash === SUPER_ADMIN_SHA256 || trimmedHash === SUPER_ADMIN_SHA256) {
+        resetLoginGuard();
+        return {
+          ok: true,
+          session: {
+            id: `super-admin:${cleanEmail}`,
+            role: 'super_admin',
+            username: SUPER_ADMIN_RESERVED_IDENTIFIERS.username,
+            email: cleanEmail,
+            namaLengkap: 'Super Admin Walidata',
+            opdId: null,
+            namaOpd: 'Diskominfo Kabupaten Nagekeo',
+          },
+        };
+      }
+
+      const fail = recordFailedLoginAttempt(cleanEmail);
+      appendSecurityEvent({
+        kategori: fail.locked ? 'Brute Force' : 'Login Gagal',
+        tingkat: fail.locked ? 'Kritis' : 'Tinggi',
+        aktor: cleanEmail,
+        target: 'Autentikasi Super Admin',
+        detail: fail.locked
+          ? 'Percobaan masuk Super Admin gagal 5 kali berturut-turut. Akses dikunci.'
+          : 'Percobaan masuk Super Admin gagal dengan kata sandi salah.',
+        diblokir: fail.locked,
+      });
       return {
-        ok: true,
-        session: {
-          id: 'super-admin',
-          role: 'super_admin',
-          username: SUPER_ADMIN_RESERVED_IDENTIFIERS.username,
-          email: SUPER_ADMIN_RESERVED_IDENTIFIERS.email,
-          namaLengkap: 'Super Admin Walidata',
-          opdId: null,
-          namaOpd: 'Diskominfo Kabupaten Nagekeo',
-        },
+        ok: false,
+        message: fail.locked
+          ? `Kata sandi salah 5 kali berturut-turut. Akses dikunci ${fail.remainingSec} detik.`
+          : `Kata sandi Super Admin tidak sesuai. Sisa percobaan: ${fail.remainingAttempts}.`,
       };
     }
-
-    const fail = recordFailedLoginAttempt(cleanId);
-    appendSecurityEvent({
-      kategori: fail.locked ? 'Brute Force' : 'Login Gagal',
-      tingkat: fail.locked ? 'Kritis' : 'Tinggi',
-      aktor: cleanId,
-      target: 'Autentikasi Super Admin',
-      detail: fail.locked
-        ? 'Percobaan masuk Super Admin gagal 5 kali berturut-turut. Akses dikunci.'
-        : 'Percobaan masuk Super Admin gagal dengan kata sandi salah.',
-      diblokir: fail.locked,
-    });
-    return {
-      ok: false,
-      message: fail.locked
-        ? `Kata sandi salah 5 kali berturut-turut. Akses dikunci ${fail.remainingSec} detik.`
-        : `Kata sandi Super Admin tidak sesuai. Sisa percobaan: ${fail.remainingAttempts}.`,
-    };
   }
 
-  // 2. Verifikasi Akun OPD
+  // 2. Jalur User / OPD — WAJIB menggunakan email yang sudah didaftarkan & berstatus Aktif
   const candidate = accounts.find(
-    (acc) =>
-      acc.username.toLowerCase() === cleanId ||
-      acc.email.toLowerCase() === cleanId
+    (acc) => acc.email.trim().toLowerCase() === cleanEmail
   );
 
   if (!candidate) {
-    const fail = recordFailedLoginAttempt(cleanId);
+    const fail = recordFailedLoginAttempt(cleanEmail);
     return {
       ok: false,
       message: fail.locked
         ? `Terlalu banyak percobaan gagal. Akses dikunci ${fail.remainingSec} detik.`
-        : `Username atau email tidak ditemukan. Sisa percobaan: ${fail.remainingAttempts}.`,
+        : `Email belum terdaftar sebagai akun User/OPD. Pastikan Anda masuk dengan email yang sudah didaftarkan. Sisa percobaan: ${fail.remainingAttempts}.`,
     };
   }
 
   if (candidate.status !== 'Aktif') {
     return {
       ok: false,
-      message: 'Akun dinas Anda sedang dinonaktifkan oleh Super Admin Walidata.',
+      message:
+        'Akun dengan email ini sedang dinonaktifkan oleh Super Admin Walidata.',
     };
   }
 
   const inputHash = await hashPassword(password);
   if (candidate.passwordHash !== inputHash) {
-    const fail = recordFailedLoginAttempt(cleanId);
+    const fail = recordFailedLoginAttempt(cleanEmail);
     return {
       ok: false,
       message: fail.locked

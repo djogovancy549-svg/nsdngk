@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import dotenv from 'dotenv';
 import express from 'express';
+import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type } from '@google/genai';
@@ -27,6 +28,79 @@ const SERVER_SUPER_ADMIN_EMAIL = (
   .toLowerCase();
 const SERVER_SUPER_ADMIN_PASSWORD =
   process.env.SUPER_ADMIN_PASSWORD || 'nagekeo2026';
+
+const ALLOWLIST_FILE_PATH = path.resolve(
+  __dirname,
+  'data',
+  'superadmin-allowlist.json'
+);
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+function normalizeEmail(raw: unknown): string {
+  return String(raw ?? '')
+    .trim()
+    .toLowerCase();
+}
+
+function getDefaultAllowedSuperAdminEmails(): string[] {
+  const fromEnv = String(process.env.SUPER_ADMIN_ALLOWED_EMAILS || '')
+    .split(',')
+    .map((e) => normalizeEmail(e))
+    .filter((e) => EMAIL_PATTERN.test(e));
+  return Array.from(new Set([SERVER_SUPER_ADMIN_EMAIL, ...fromEnv]));
+}
+
+function loadSuperAdminAllowedEmails(): string[] {
+  const defaults = getDefaultAllowedSuperAdminEmails();
+  try {
+    if (fs.existsSync(ALLOWLIST_FILE_PATH)) {
+      const raw = fs.readFileSync(ALLOWLIST_FILE_PATH, 'utf8');
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        const cleaned = parsed
+          .map((e) => normalizeEmail(e))
+          .filter((e) => EMAIL_PATTERN.test(e));
+        return Array.from(new Set([SERVER_SUPER_ADMIN_EMAIL, ...cleaned]));
+      }
+    }
+  } catch {
+    // Fallback ke default jika file belum siap
+  }
+  return defaults;
+}
+
+function saveSuperAdminAllowedEmails(emails: string[]): string[] {
+  const normalized = Array.from(
+    new Set([
+      SERVER_SUPER_ADMIN_EMAIL,
+      ...emails.map((e) => normalizeEmail(e)).filter((e) => EMAIL_PATTERN.test(e)),
+    ])
+  );
+  try {
+    const dir = path.dirname(ALLOWLIST_FILE_PATH);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.writeFileSync(
+      ALLOWLIST_FILE_PATH,
+      JSON.stringify(normalized, null, 2),
+      'utf8'
+    );
+  } catch {
+    // Abaikan jika filesystem read-only
+  }
+  return normalized;
+}
+
+let superAdminAllowedEmails: string[] = loadSuperAdminAllowedEmails();
+
+function isAuthorizedSuperAdminEmail(email: string): boolean {
+  const clean = normalizeEmail(email);
+  if (!EMAIL_PATTERN.test(clean)) return false;
+  return superAdminAllowedEmails.some((allowed) =>
+    timingSafeEqualStr(clean, allowed)
+  );
+}
 
 function timingSafeEqualStr(a: string, b: string): boolean {
   const bufA = Buffer.from(a, 'utf8');
@@ -320,7 +394,7 @@ async function startServer() {
   app.use(express.json({ limit: '1mb' }));
   app.use(bodyWafGuard);
 
-  // 1. Server-side Super Admin Authentication (with brute-force lockout)
+  // 1. Server-side Super Admin Authentication (strictly email-allowlisted + brute-force lockout)
   app.post('/api/auth/superadmin', (req, res) => {
     const ip = getClientIp(req);
     const now = Date.now();
@@ -336,16 +410,29 @@ async function startServer() {
       });
     }
 
-    const identifier = String(req.body?.identifier ?? '')
-      .trim()
-      .toLowerCase();
+    const identifier = normalizeEmail(req.body?.identifier);
     const password = String(req.body?.password ?? '');
+    const loginRole = String(req.body?.loginRole ?? 'super_admin');
 
-    const isSuperAdminIdentifier =
-      timingSafeEqualStr(identifier, SERVER_SUPER_ADMIN_USER) ||
-      timingSafeEqualStr(identifier, SERVER_SUPER_ADMIN_EMAIL);
+    const isAllowedEmail = isAuthorizedSuperAdminEmail(identifier);
 
-    if (!isSuperAdminIdentifier) {
+    if (!isAllowedEmail) {
+      if (loginRole === 'super_admin') {
+        recordServerIntrusion(
+          ip,
+          '/api/auth/superadmin',
+          'Akses Super Admin dengan Email Tidak Terdaftar',
+          `Menolak email "${identifier || '(kosong)'}" karena tidak termasuk dalam daftar email resmi Super Admin.`,
+          'Tinggi'
+        );
+        return res.status(403).json({
+          ok: false,
+          isSuperAdminCandidate: true,
+          unauthorizedEmail: true,
+          message:
+            'Akses Super Admin ditolak. Email ini tidak terdaftar dalam daftar email resmi Super Admin.',
+        });
+      }
       return res.status(200).json({ ok: false, isSuperAdminCandidate: false });
     }
 
@@ -358,10 +445,10 @@ async function startServer() {
         ok: true,
         isSuperAdminCandidate: true,
         session: {
-          id: 'super-admin',
+          id: `super-admin:${identifier}`,
           role: 'super_admin',
           username: SERVER_SUPER_ADMIN_USER,
-          email: SERVER_SUPER_ADMIN_EMAIL,
+          email: identifier,
           namaLengkap: 'Super Admin Walidata',
           opdId: null,
           namaOpd: 'Diskominfo Kabupaten Nagekeo',
@@ -399,9 +486,92 @@ async function startServer() {
       ok: false,
       isSuperAdminCandidate: true,
       remainingAttempts: MAX_FAILED_ATTEMPTS - nextAttempts,
-      message: `Kredensial tidak valid. Sisa percobaan sebelum penguncian otomatis: ${
+      message: `Kata sandi Super Admin tidak sesuai. Sisa percobaan sebelum penguncian otomatis: ${
         MAX_FAILED_ATTEMPTS - nextAttempts
       }.`,
+    });
+  });
+
+  // 1a. Manajemen Daftar Email Resmi Super Admin (Allowlist)
+  const requireSuperAdminActor = (
+    req: express.Request,
+    res: express.Response
+  ): string | null => {
+    const actorEmail = normalizeEmail(req.headers['x-superadmin-email']);
+    if (!isAuthorizedSuperAdminEmail(actorEmail)) {
+      res.status(403).json({
+        ok: false,
+        message: 'Hanya Super Admin dengan email terotorisasi yang dapat mengelola daftar ini.',
+      });
+      return null;
+    }
+    return actorEmail;
+  };
+
+  app.get('/api/auth/superadmin/allowlist', (req, res) => {
+    if (!requireSuperAdminActor(req, res)) return;
+    return res.json({
+      ok: true,
+      primaryEmail: SERVER_SUPER_ADMIN_EMAIL,
+      allowedEmails: superAdminAllowedEmails,
+    });
+  });
+
+  app.post('/api/auth/superadmin/allowlist', (req, res) => {
+    if (!requireSuperAdminActor(req, res)) return;
+    const newEmail = normalizeEmail(req.body?.email);
+    if (!EMAIL_PATTERN.test(newEmail)) {
+      return res.status(400).json({
+        ok: false,
+        message: 'Format alamat email tidak valid.',
+      });
+    }
+    if (superAdminAllowedEmails.includes(newEmail)) {
+      return res.status(409).json({
+        ok: false,
+        message: `Email ${newEmail} sudah terdaftar sebagai Super Admin.`,
+      });
+    }
+    superAdminAllowedEmails = saveSuperAdminAllowedEmails([
+      ...superAdminAllowedEmails,
+      newEmail,
+    ]);
+    return res.status(201).json({
+      ok: true,
+      primaryEmail: SERVER_SUPER_ADMIN_EMAIL,
+      allowedEmails: superAdminAllowedEmails,
+      message: `Email ${newEmail} berhasil didaftarkan untuk akses Super Admin.`,
+    });
+  });
+
+  app.delete('/api/auth/superadmin/allowlist', (req, res) => {
+    if (!requireSuperAdminActor(req, res)) return;
+    const targetEmail = normalizeEmail(req.body?.email || req.query?.email);
+    if (!targetEmail) {
+      return res.status(400).json({
+        ok: false,
+        message: 'Alamat email yang akan dicabut wajib diisi.',
+      });
+    }
+    if (timingSafeEqualStr(targetEmail, SERVER_SUPER_ADMIN_EMAIL)) {
+      return res.status(400).json({
+        ok: false,
+        message: 'Email utama Super Admin tidak dapat dihapus agar akses sistem tetap terjaga.',
+      });
+    }
+    const nextList = superAdminAllowedEmails.filter((e) => e !== targetEmail);
+    if (nextList.length === 0) {
+      return res.status(400).json({
+        ok: false,
+        message: 'Minimal harus tersisa satu email Super Admin aktif.',
+      });
+    }
+    superAdminAllowedEmails = saveSuperAdminAllowedEmails(nextList);
+    return res.json({
+      ok: true,
+      primaryEmail: SERVER_SUPER_ADMIN_EMAIL,
+      allowedEmails: superAdminAllowedEmails,
+      message: `Akses Super Admin untuk email ${targetEmail} berhasil dicabut.`,
     });
   });
 
