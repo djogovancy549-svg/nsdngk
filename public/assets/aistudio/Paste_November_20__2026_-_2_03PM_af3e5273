@@ -1,0 +1,708 @@
+/**
+ * security.js — Lapisan keamanan Cloudflare Worker
+ * Untuk: Satu Data Nagekeo (nsdngk.cvebi.workers.dev)
+ *
+ * Fitur
+ *  1. Header keamanan (HSTS, CSP, nosniff, frame-ancestors, Referrer/Permissions-Policy, COOP/CORP)
+ *  2. Penyaringan metode HTTP, panjang URL, ukuran & tipe body
+ *  3. Blokir scanner (User-Agent) dan path pengintaian (/.env, /.git, /wp-login.php, dst.)
+ *  4. WAF ringan: SQLi, XSS, path traversal, command injection, SSRF, Log4Shell, prototype pollution
+ *  5. Rate limit (binding Cloudflare, cadangan in-memory) terpisah untuk baca dan tulis
+ *  6. Proteksi CSRF (validasi Origin / Referer / Sec-Fetch-Site) + CORS allowlist
+ *  7. Verifikasi HMAC-SHA256 + anti-replay untuk endpoint webhook (per Dinas/OPD)
+ *  8. Auto-ban IP berulang (opsional, butuh KV)
+ *  9. Penguatan cookie (Secure, SameSite, HttpOnly), hapus header bocor, error generik
+ * 10. Log JSON terstruktur (lihat di Workers Logs) + /.well-known/security.txt
+ *
+ * ─────────────────────────────────────────────────────────────
+ * CARA PASANG
+ * ─────────────────────────────────────────────────────────────
+ * 1) Simpan file ini di samping index.js sebagai security.js
+ *
+ * 2) Di index.js, bungkus handler lama (kode aplikasi tidak perlu diubah):
+ *
+ *      import { withSecurity } from "./security.js";
+ *
+ *      const app = {
+ *        async fetch(request, env, ctx) {
+ *          // ... kode portal Satu Data Nagekeo yang sudah ada ...
+ *        },
+ *      };
+ *
+ *      export default {
+ *        fetch: withSecurity(app.fetch.bind(app), {
+ *          // contoh opsi (semua opsional, lihat DEFAULTS di bawah)
+ *          securityContact: "mailto:alamat-email-keamanan-anda",
+ *          webhookPaths: ["/webhook"],
+ *          // allowCountries: ["ID"],
+ *        }),
+ *      };
+ *
+ * 3) wrangler.jsonc (binding opsional tapi sangat disarankan):
+ *
+ *      {
+ *        "ratelimits": [
+ *          { "name": "RATE_LIMITER",       "namespace_id": "1001", "simple": { "limit": 120, "period": 60 } },
+ *          { "name": "RATE_LIMITER_WRITE", "namespace_id": "1002", "simple": { "limit": 30,  "period": 60 } }
+ *        ],
+ *        "kv_namespaces": [ { "binding": "SECURITY_KV", "id": "<ID_KV_ANDA>" } ],
+ *        "observability": { "enabled": true }
+ *      }
+ *
+ *    Secret untuk webhook (bila webhookPaths dipakai):
+ *      npx wrangler secret put WEBHOOK_SECRET
+ *
+ * ─────────────────────────────────────────────────────────────
+ * FORMAT TANDA TANGAN WEBHOOK
+ * ─────────────────────────────────────────────────────────────
+ * Pengirim mengirim POST ke path di webhookPaths dengan header:
+ *   X-Timestamp: <detik unix>
+ *   X-Signature: sha256=<hex HMAC-SHA256 dari "<timestamp>.<body mentah>" dengan WEBHOOK_SECRET>
+ *
+ * Contoh pengirim di Google Apps Script:
+ *   const ts = String(Math.floor(Date.now() / 1000));
+ *   const raw = Utilities.computeHmacSha256Signature(ts + "." + body, SECRET);
+ *   const sig = raw.map(b => ("0" + (b & 0xff).toString(16)).slice(-2)).join("");
+ *   UrlFetchApp.fetch(URL, { method: "post", contentType: "application/json", payload: body,
+ *     headers: { "X-Timestamp": ts, "X-Signature": "sha256=" + sig } });
+ *
+ * CATATAN PENTING
+ *  - CSP default berjalan dalam mode Report-Only agar portal tidak rusak. Buka situs,
+ *    periksa console browser / log "csp-violation", tambahkan sumber yang sah lewat
+ *    csp.extra, lalu set csp.reportOnly = false.
+ *  - Kantor pemerintah sering berbagi satu IP publik. Rate limit TIDAK memicu auto-ban,
+ *    hanya pelanggaran nyata (payload serangan, scanner, path pengintaian) yang dihitung.
+ */
+
+// ─────────────────────────────────────────────────────────────
+// Konfigurasi bawaan
+// ─────────────────────────────────────────────────────────────
+const DEFAULTS = {
+  allowedMethods: ["GET", "HEAD", "POST", "OPTIONS"],
+  maxUrlLength: 4096,
+  maxBodyBytes: 1_000_000, // 1 MB
+  blockEmptyUserAgent: true,
+
+  // Origin tambahan (selain origin Worker ini) yang boleh memanggil API / mengirim form.
+  allowedOrigins: [],
+  corsEnabled: false, // true bila API dipanggil dari domain lain
+  allowNoOrigin: true, // request tanpa Origin/Referer (server-ke-server, curl) boleh lewat
+
+  // Rate limit cadangan (dipakai bila binding RATE_LIMITER* tidak ada)
+  rateLimit: { windowMs: 60_000, max: 120, maxWrite: 30 },
+
+  // Kode negara ISO (mis. "ID"). Kosong = nonaktif.
+  allowCountries: [],
+  blockCountries: [],
+  trustedIps: [], // IP yang melewati pemeriksaan (mis. IP kantor/monitoring)
+
+  inspectBody: true,
+  wafMode: "block", // "block" | "log" (log = hanya catat, tidak memblokir)
+
+  autoBan: { enabled: true, strikes: 5, windowSec: 600, banSec: 3600 },
+
+  // Path webhook yang diverifikasi HMAC (butuh env.WEBHOOK_SECRET)
+  webhookPaths: [],
+  webhookMaxSkewSec: 300,
+
+  // Path yang tidak boleh di-cache sama sekali (selain semua request tulis)
+  noStorePaths: [],
+
+  // Isi "mailto:..." atau "https://..." untuk menyajikan /.well-known/security.txt
+  securityContact: "",
+
+  forceHttpOnlyCookies: true,
+
+  permissionsPolicy:
+    "camera=(), microphone=(), geolocation=(), payment=(), usb=(), interest-cohort=()",
+
+  csp: {
+    reportOnly: true,
+    extra: {}, // contoh: { "script-src": ["https://cdn.tailwindcss.com"] }
+  },
+};
+
+// Sumber CSP default: Google Apps Script/Sheets + CDN umum. 'unsafe-inline' dipertahankan
+// karena portal berupa satu file HTML dengan script/style inline.
+const CSP_DEFAULT = {
+  "default-src": ["'self'"],
+  "script-src": [
+    "'self'", "'unsafe-inline'",
+    "https://cdnjs.cloudflare.com", "https://cdn.jsdelivr.net",
+    "https://unpkg.com", "https://apis.google.com",
+  ],
+  "style-src": [
+    "'self'", "'unsafe-inline'",
+    "https://fonts.googleapis.com", "https://cdnjs.cloudflare.com", "https://cdn.jsdelivr.net",
+  ],
+  "font-src": [
+    "'self'", "data:",
+    "https://fonts.gstatic.com", "https://cdnjs.cloudflare.com", "https://cdn.jsdelivr.net",
+  ],
+  "img-src": ["'self'", "data:", "blob:", "https:"],
+  "connect-src": [
+    "'self'",
+    "https://script.google.com", "https://script.googleusercontent.com",
+    "https://docs.google.com", "https://sheets.googleapis.com",
+    "https://*.googleusercontent.com",
+  ],
+  "frame-src": [
+    "'self'", "https://script.google.com", "https://*.googleusercontent.com",
+    "https://docs.google.com", "https://drive.google.com",
+  ],
+  "frame-ancestors": ["'self'"],
+  "base-uri": ["'self'"],
+  "form-action": ["'self'", "https://script.google.com"],
+  "object-src": ["'none'"],
+  "worker-src": ["'self'", "blob:"],
+  "manifest-src": ["'self'"],
+  "upgrade-insecure-requests": [],
+};
+
+const CSP_REPORT_PATH = "/__csp-report";
+
+// ─────────────────────────────────────────────────────────────
+// Aturan deteksi
+// ─────────────────────────────────────────────────────────────
+const BAD_UA = /(sqlmap|nikto|nmap|masscan|zgrab|acunetix|nessus|openvas|wpscan|dirbuster|gobuster|ffuf|feroxbuster|wfuzz|hydra|havij|nuclei|metasploit|w3af|arachni|commix|whatweb|netsparker|appscan|qualys)/i;
+
+const PROBE_PATHS =
+  /^\/(?:\.env|\.git|\.svn|\.hg|\.ds_store|\.htaccess|\.htpasswd|\.aws|\.ssh|\.dev\.vars|wp-admin|wp-login\.php|wp-content|wp-includes|xmlrpc\.php|phpmyadmin|pma|adminer|cgi-bin|vendor\/phpunit|actuator|server-status|server-info|boot\.ini|etc\/passwd|id_rsa|composer\.(?:json|lock)|package(?:-lock)?\.json|wrangler\.(?:toml|jsonc?))/i;
+
+// scope "url" = hanya path/query; "all" = juga body & header
+const WAF_RULES = [
+  { id: "sqli-union", scope: "all", re: /\bunion\b[\s\S]{0,40}\bselect\b/i },
+  { id: "sqli-tautology", scope: "all", re: /['"]\s*(?:or|and)\s+['"]?\w+['"]?\s*=\s*['"]?\w+/i },
+  { id: "sqli-destructive", scope: "all", re: /(?:\b(?:drop|truncate)\s+table\b|;\s*(?:drop|shutdown)\b)/i },
+  { id: "sqli-timing", scope: "all", re: /\b(?:sleep|benchmark|pg_sleep|waitfor\s+delay)\s*\(/i },
+  { id: "sqli-schema", scope: "all", re: /\b(?:information_schema|sqlite_master|xp_cmdshell)\b/i },
+  { id: "xss-script-tag", scope: "all", re: /<\s*script\b/i },
+  { id: "xss-js-uri", scope: "all", re: /\bjavascript\s*:/i },
+  { id: "xss-event-handler", scope: "all", re: /<[^>]{0,200}\bon(?:error|load|click|mouseover|focus|toggle|begin)\s*=/i },
+  { id: "xss-embed", scope: "all", re: /<\s*(?:iframe|object|embed)\b/i },
+  { id: "xss-cookie", scope: "all", re: /document\s*\.\s*(?:cookie|write)\b/i },
+  { id: "log4shell", scope: "all", re: /\$\{\s*(?:jndi|env|sys|lower|upper)\s*:/i },
+  { id: "cmd-injection", scope: "all", re: /(?:;|\||&&|`|\$\()\s*(?:cat|ls|id|whoami|curl|wget|nc|bash|sh|powershell|cmd)\b/i },
+  { id: "template-injection", scope: "all", re: /\{\{[^}]{0,100}(?:constructor|__proto__)[^}]{0,100}\}\}/i },
+  { id: "path-traversal", scope: "url", re: /(?:\.\.[\/\\])|(?:etc\/(?:passwd|shadow))|(?:win\.ini)|\u0000/i },
+  { id: "ssrf", scope: "url", re: /(?:169\.254\.169\.254|metadata\.google\.internal|localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])/i },
+];
+
+const DANGEROUS_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+const BODY_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+const INSPECTABLE_CT = new Set(["application/json", "application/x-www-form-urlencoded", "text/plain"]);
+const ALLOWED_CT = new Set([...INSPECTABLE_CT, "multipart/form-data"]);
+
+const STATUS_TEXT = {
+  400: "Permintaan tidak valid.",
+  403: "Akses ditolak.",
+  404: "Halaman tidak ditemukan.",
+  405: "Metode tidak diizinkan.",
+  413: "Ukuran permintaan terlalu besar.",
+  414: "URL terlalu panjang.",
+  415: "Tipe konten tidak didukung.",
+  429: "Terlalu banyak permintaan. Coba lagi sebentar lagi.",
+  500: "Terjadi kesalahan pada server.",
+  503: "Layanan tidak tersedia.",
+};
+
+// ─────────────────────────────────────────────────────────────
+// Utilitas
+// ─────────────────────────────────────────────────────────────
+const isObj = (v) => v && typeof v === "object" && !Array.isArray(v);
+
+function merge(base, extra) {
+  const out = { ...base };
+  for (const [k, v] of Object.entries(extra || {})) {
+    out[k] = isObj(v) && isObj(base[k]) ? merge(base[k], v) : v;
+  }
+  return out;
+}
+
+function decodeLayers(s) {
+  let out = s;
+  for (let i = 0; i < 2; i++) {
+    try {
+      const d = decodeURIComponent(out.replace(/\+/g, " "));
+      if (d === out) break;
+      out = d;
+    } catch {
+      break;
+    }
+  }
+  return out;
+}
+
+/** Periksa teks terhadap aturan WAF. Mengembalikan id aturan atau null. */
+export function inspectPayload(value, scope = "all") {
+  for (const rule of WAF_RULES) {
+    if (rule.scope === "url" && scope !== "url") continue;
+    if (rule.re.test(value)) return rule.id;
+  }
+  return null;
+}
+
+function walkJson(node, out, depth = 0) {
+  if (depth > 20) return "json-too-deep";
+  if (out.length > 5000) return null;
+  if (typeof node === "string") {
+    out.push(node);
+  } else if (Array.isArray(node)) {
+    for (const item of node) {
+      const r = walkJson(item, out, depth + 1);
+      if (r) return r;
+    }
+  } else if (isObj(node)) {
+    for (const key of Object.keys(node)) {
+      if (DANGEROUS_KEYS.has(key)) return "proto-pollution";
+      out.push(key);
+      const r = walkJson(node[key], out, depth + 1);
+      if (r) return r;
+    }
+  }
+  return null;
+}
+
+function inspectBody(text, contentType) {
+  if (contentType === "application/json") {
+    try {
+      const strings = [];
+      const bad = walkJson(JSON.parse(text), strings);
+      if (bad) return bad;
+      for (const s of strings) {
+        const hit = inspectPayload(decodeLayers(s), "all");
+        if (hit) return hit;
+      }
+      return null;
+    } catch {
+      /* bukan JSON valid → periksa sebagai teks mentah */
+    }
+  }
+  return inspectPayload(decodeLayers(text), "all");
+}
+
+async function readBodyLimited(request, max) {
+  const stream = request.clone().body;
+  if (!stream) return { bytes: new Uint8Array(0), tooLarge: false };
+  const reader = stream.getReader();
+  const chunks = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > max) {
+      reader.cancel().catch(() => {});
+      return { bytes: null, tooLarge: true };
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const c of chunks) {
+    bytes.set(c, offset);
+    offset += c.byteLength;
+  }
+  return { bytes, tooLarge: false };
+}
+
+function hexToBytes(hex) {
+  if (!/^[0-9a-f]{64}$/i.test(hex)) return null;
+  const out = new Uint8Array(32);
+  for (let i = 0; i < 32; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+
+async function verifyHmac(secret, timestamp, bodyBytes, signatureHex) {
+  const sig = hexToBytes(signatureHex);
+  if (!sig) return false;
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["verify"]
+  );
+  const prefix = enc.encode(`${timestamp}.`);
+  const data = new Uint8Array(prefix.length + bodyBytes.length);
+  data.set(prefix, 0);
+  data.set(bodyBytes, prefix.length);
+  return crypto.subtle.verify("HMAC", key, sig, data); // pembandingan waktu-konstan
+}
+
+// Rate limit cadangan (per isolate)
+const memHits = new Map();
+function memLimit(key, limit, windowMs) {
+  const now = Date.now();
+  let e = memHits.get(key);
+  if (!e || now - e.start >= windowMs) {
+    e = { start: now, count: 0 };
+    memHits.set(key, e);
+  }
+  e.count++;
+  if (memHits.size > 5000) {
+    for (const [k, v] of memHits) if (now - v.start >= windowMs) memHits.delete(k);
+  }
+  return e.count <= limit;
+}
+
+async function allowRequest(env, cfg, ip, write) {
+  const binding = write ? env.RATE_LIMITER_WRITE : env.RATE_LIMITER;
+  const key = `${write ? "w" : "r"}:${ip}`;
+  if (binding && typeof binding.limit === "function") {
+    try {
+      const { success } = await binding.limit({ key });
+      return success;
+    } catch {
+      /* jatuh ke cadangan in-memory */
+    }
+  }
+  const { max, maxWrite, windowMs } = cfg.rateLimit;
+  return memLimit(key, write ? maxWrite : max, windowMs);
+}
+
+function recordStrike(env, ctx, cfg, ip, reason) {
+  if (!env.SECURITY_KV || !cfg.autoBan.enabled) return;
+  ctx.waitUntil(
+    (async () => {
+      const key = `strike:${ip}`;
+      const n = (parseInt(await env.SECURITY_KV.get(key), 10) || 0) + 1;
+      if (n >= cfg.autoBan.strikes) {
+        await env.SECURITY_KV.put(`ban:${ip}`, reason, {
+          expirationTtl: Math.max(60, cfg.autoBan.banSec),
+        });
+        await env.SECURITY_KV.delete(key);
+      } else {
+        await env.SECURITY_KV.put(key, String(n), {
+          expirationTtl: Math.max(60, cfg.autoBan.windowSec),
+        });
+      }
+    })().catch(() => {})
+  );
+}
+
+function log(event, info, extra = {}) {
+  try {
+    console.log(JSON.stringify({ ts: new Date().toISOString(), event, ...info, ...extra }));
+  } catch {
+    /* abaikan */
+  }
+}
+
+function deny(status, reason, info, headers = {}) {
+  log("blocked", info, { status, reason });
+  return new Response(STATUS_TEXT[status] || "Ditolak.", {
+    status,
+    headers: {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Cache-Control": "no-store",
+      ...headers,
+    },
+  });
+}
+
+function buildCsp(cfg) {
+  const extra = cfg.csp.extra || {};
+  const directives = [];
+  for (const [name, sources] of Object.entries(CSP_DEFAULT)) {
+    const merged = [...sources, ...(extra[name] || [])];
+    directives.push(merged.length ? `${name} ${[...new Set(merged)].join(" ")}` : name);
+  }
+  for (const [name, sources] of Object.entries(extra)) {
+    if (!(name in CSP_DEFAULT)) directives.push(`${name} ${sources.join(" ")}`.trim());
+  }
+  directives.push(`report-uri ${CSP_REPORT_PATH}`);
+  return directives.join("; ");
+}
+
+function hardenCookie(cookie, cfg) {
+  let c = cookie;
+  if (!/;\s*secure/i.test(c)) c += "; Secure";
+  if (!/;\s*samesite=/i.test(c)) c += "; SameSite=Lax";
+  if (cfg.forceHttpOnlyCookies && !/;\s*httponly/i.test(c)) c += "; HttpOnly";
+  return c;
+}
+
+function originAllowed(origin, url, cfg) {
+  return origin === url.origin || cfg.allowedOrigins.includes(origin);
+}
+
+function checkOrigin(request, url, cfg) {
+  const origin = request.headers.get("Origin");
+  if (origin) return originAllowed(origin, url, cfg);
+  const referer = request.headers.get("Referer");
+  if (referer) {
+    try {
+      return originAllowed(new URL(referer).origin, url, cfg);
+    } catch {
+      return false;
+    }
+  }
+  const site = request.headers.get("Sec-Fetch-Site");
+  if (site) return site === "same-origin" || site === "none";
+  return cfg.allowNoOrigin;
+}
+
+function securityTxt(url, cfg) {
+  const expires = new Date(Date.now() + 365 * 24 * 3600 * 1000).toISOString();
+  const body = [
+    `Contact: ${cfg.securityContact}`,
+    `Expires: ${expires}`,
+    "Preferred-Languages: id, en",
+    `Canonical: ${url.origin}/.well-known/security.txt`,
+    "",
+  ].join("\n");
+  return new Response(body, {
+    headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "public, max-age=86400" },
+  });
+}
+
+// ─────────────────────────────────────────────────────────────
+// Penjaga (guard): mengembalikan Response bila diblokir, null bila lolos
+// ─────────────────────────────────────────────────────────────
+async function guard(request, env, ctx, url, cfg, info) {
+  // HTTPS wajib
+  if (url.protocol === "http:" && url.hostname !== "localhost" && url.hostname !== "127.0.0.1") {
+    const target = new URL(url);
+    target.protocol = "https:";
+    return Response.redirect(target.toString(), 308);
+  }
+
+  if (url.pathname === "/.well-known/security.txt" && cfg.securityContact && request.method === "GET") {
+    return securityTxt(url, cfg);
+  }
+
+  if (!cfg.allowedMethods.includes(request.method)) {
+    return deny(405, "method", info, { Allow: cfg.allowedMethods.join(", ") });
+  }
+  if (request.url.length > cfg.maxUrlLength) return deny(414, "url-length", info);
+
+  if (cfg.trustedIps.includes(info.ip)) return null;
+
+  if (env.SECURITY_KV && (await env.SECURITY_KV.get(`ban:${info.ip}`, { cacheTtl: 60 }))) {
+    return deny(403, "banned-ip", info);
+  }
+
+  const cc = info.country;
+  if (cc && cfg.allowCountries.length && !cfg.allowCountries.includes(cc)) return deny(403, "geo-not-allowed", info);
+  if (cc && cfg.blockCountries.includes(cc)) return deny(403, "geo-blocked", info);
+
+  const pathLower = url.pathname.toLowerCase();
+  const isWebhook = cfg.webhookPaths.some((p) => {
+    const base = p.toLowerCase().replace(/\/+$/, "");
+    return pathLower === base || pathLower.startsWith(base + "/");
+  });
+
+  const ua = request.headers.get("User-Agent") || "";
+  if (BAD_UA.test(ua)) {
+    recordStrike(env, ctx, cfg, info.ip, "scanner-ua");
+    return deny(403, "scanner-ua", info);
+  }
+  if (!ua && cfg.blockEmptyUserAgent && !isWebhook) return deny(403, "empty-ua", info);
+
+  const decodedPath = decodeLayers(url.pathname);
+  if (PROBE_PATHS.test(decodedPath)) {
+    recordStrike(env, ctx, cfg, info.ip, "probe-path");
+    return deny(404, "probe-path", info);
+  }
+
+  const write = BODY_METHODS.has(request.method);
+  if (!(await allowRequest(env, cfg, info.ip, write))) {
+    return deny(429, "rate-limit", info, { "Retry-After": "60" });
+  }
+
+  // Penerima laporan pelanggaran CSP
+  if (url.pathname === CSP_REPORT_PATH) {
+    if (request.method !== "POST") return deny(405, "method", info, { Allow: "POST" });
+    const { bytes } = await readBodyLimited(request, 10_000);
+    if (bytes) {
+      log("csp-violation", info, { report: new TextDecoder().decode(bytes).slice(0, 2000) });
+    }
+    return new Response(null, { status: 204 });
+  }
+
+  // Preflight / OPTIONS
+  if (request.method === "OPTIONS") {
+    const origin = request.headers.get("Origin");
+    if (cfg.corsEnabled && origin && originAllowed(origin, url, cfg)) {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          "Access-Control-Allow-Origin": origin,
+          "Access-Control-Allow-Methods": cfg.allowedMethods.join(", "),
+          "Access-Control-Allow-Headers": "Content-Type, X-Signature, X-Timestamp",
+          "Access-Control-Max-Age": "600",
+          Vary: "Origin",
+        },
+      });
+    }
+    return new Response(null, { status: 204, headers: { Allow: cfg.allowedMethods.join(", ") } });
+  }
+
+  if (isWebhook && request.method !== "POST") return deny(405, "webhook-method", info, { Allow: "POST" });
+
+  // CSRF: request tulis dari browser harus berasal dari origin sendiri / allowlist
+  if (write && !isWebhook && !checkOrigin(request, url, cfg)) {
+    return deny(403, "csrf-origin", info);
+  }
+
+  // WAF pada URL
+  const wafMode = cfg.wafMode;
+  const urlHit = inspectPayload(`${decodedPath}\n${decodeLayers(url.search)}`, "url");
+  if (urlHit) {
+    log("waf-hit", info, { rule: urlHit, where: "url" });
+    if (wafMode === "block") {
+      recordStrike(env, ctx, cfg, info.ip, `waf:${urlHit}`);
+      return deny(403, `waf:${urlHit}`, info);
+    }
+  }
+
+  // Log4Shell pada header umum
+  for (const h of ["User-Agent", "Referer", "X-Forwarded-For", "X-Api-Version"]) {
+    const v = request.headers.get(h);
+    if (v && /\$\{\s*(?:jndi|env|sys|lower|upper)\s*:/i.test(decodeLayers(v))) {
+      recordStrike(env, ctx, cfg, info.ip, "log4shell-header");
+      return deny(403, "waf:log4shell-header", info);
+    }
+  }
+
+  // Body
+  if (write) {
+    const len = Number(request.headers.get("Content-Length") || 0);
+    if (len > cfg.maxBodyBytes) return deny(413, "body-too-large", info);
+
+    const ct = (request.headers.get("Content-Type") || "").split(";")[0].trim().toLowerCase();
+    // Jangan mengandalkan header: body bisa ada tanpa Content-Length (chunked / HTTP/2)
+    const hasBody = request.body !== null;
+    if (hasBody && ct && !ALLOWED_CT.has(ct)) return deny(415, "content-type", info);
+
+    const inspect = cfg.inspectBody && hasBody && INSPECTABLE_CT.has(ct);
+    if (isWebhook || inspect) {
+      const { bytes, tooLarge } = await readBodyLimited(request, cfg.maxBodyBytes);
+      if (tooLarge) return deny(413, "body-too-large", info);
+
+      if (isWebhook) {
+        const secret = env.WEBHOOK_SECRET;
+        if (!secret) {
+          log("config-error", info, { problem: "WEBHOOK_SECRET belum diset" });
+          return deny(503, "webhook-secret-missing", info);
+        }
+        const ts = request.headers.get("X-Timestamp") || "";
+        const sig = (request.headers.get("X-Signature") || "").replace(/^sha256=/i, "");
+        const skew = Math.abs(Date.now() / 1000 - Number(ts));
+        if (!/^\d{9,12}$/.test(ts) || !(skew <= cfg.webhookMaxSkewSec)) {
+          return deny(403, "webhook-timestamp", info);
+        }
+        if (!(await verifyHmac(secret, ts, bytes, sig))) {
+          recordStrike(env, ctx, cfg, info.ip, "webhook-bad-signature");
+          return deny(403, "webhook-signature", info);
+        }
+      }
+
+      if (inspect) {
+        const hit = inspectBody(new TextDecoder().decode(bytes), ct);
+        if (hit) {
+          log("waf-hit", info, { rule: hit, where: "body" });
+          if (wafMode === "block") {
+            recordStrike(env, ctx, cfg, info.ip, `waf:${hit}`);
+            return deny(403, `waf:${hit}`, info);
+          }
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+// ─────────────────────────────────────────────────────────────
+// Penambahan header pada setiap respons
+// ─────────────────────────────────────────────────────────────
+function finalize(response, request, url, cfg, info) {
+  const res = new Response(response.body, response); // salinan yang bisa diubah
+  const h = res.headers;
+
+  h.delete("Server");
+  h.delete("X-Powered-By");
+
+  h.set("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+  h.set("X-Content-Type-Options", "nosniff");
+  h.set("X-Frame-Options", "SAMEORIGIN");
+  h.set("Referrer-Policy", "strict-origin-when-cross-origin");
+  h.set("Permissions-Policy", cfg.permissionsPolicy);
+  h.set("Cross-Origin-Opener-Policy", "same-origin-allow-popups");
+  h.set("Cross-Origin-Resource-Policy", "same-site");
+  h.set("X-DNS-Prefetch-Control", "off");
+  h.set("X-Permitted-Cross-Domain-Policies", "none");
+  if (info.ray) h.set("X-Request-Id", info.ray);
+
+  const ct = (h.get("Content-Type") || "").toLowerCase();
+  if (ct.includes("text/html")) {
+    h.set(
+      cfg.csp.reportOnly ? "Content-Security-Policy-Report-Only" : "Content-Security-Policy",
+      buildCsp(cfg)
+    );
+  } else if (ct.includes("json")) {
+    h.set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'");
+  }
+
+  if (BODY_METHODS.has(request.method) || cfg.noStorePaths.includes(url.pathname)) {
+    if (!h.has("Cache-Control")) h.set("Cache-Control", "no-store");
+  }
+
+  if (typeof h.getSetCookie === "function") {
+    const cookies = h.getSetCookie();
+    if (cookies.length) {
+      h.delete("Set-Cookie");
+      for (const c of cookies) h.append("Set-Cookie", hardenCookie(c, cfg));
+    }
+  }
+
+  if (cfg.corsEnabled) {
+    const origin = request.headers.get("Origin");
+    h.append("Vary", "Origin");
+    if (origin && originAllowed(origin, url, cfg)) h.set("Access-Control-Allow-Origin", origin);
+  }
+
+  return res;
+}
+
+// ─────────────────────────────────────────────────────────────
+// API publik
+// ─────────────────────────────────────────────────────────────
+/**
+ * Membungkus handler fetch milik aplikasi dengan lapisan keamanan.
+ * @param {(request: Request, env: any, ctx: any) => Promise<Response>} handler
+ * @param {Partial<typeof DEFAULTS>} userConfig
+ */
+export function withSecurity(handler, userConfig = {}) {
+  const cfg = merge(DEFAULTS, userConfig);
+
+  return async function secureFetch(request, env, ctx) {
+    const url = new URL(request.url);
+    const info = {
+      ip: request.headers.get("CF-Connecting-IP") || "0.0.0.0",
+      ray: request.headers.get("CF-Ray") || "",
+      country: (request.cf && request.cf.country) || request.headers.get("CF-IPCountry") || "",
+      method: request.method,
+      path: url.pathname,
+    };
+
+    try {
+      const blocked = await guard(request, env, ctx, url, cfg, info);
+      if (blocked) return finalize(blocked, request, url, cfg, info);
+
+      const response = await handler(request, env, ctx);
+      return finalize(response, request, url, cfg, info);
+    } catch (err) {
+      log("error", info, { message: String(err && err.message ? err.message : err) });
+      return finalize(
+        new Response(STATUS_TEXT[500], {
+          status: 500,
+          headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" },
+        }),
+        request, url, cfg, info
+      );
+    }
+  };
+}
+
+export default withSecurity;

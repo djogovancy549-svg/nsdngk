@@ -4,6 +4,7 @@ import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type } from '@google/genai';
+import { createSecurityMiddleware } from './server/securityMiddleware.ts';
 
 dotenv.config();
 
@@ -282,20 +283,42 @@ function buildHeuristicPayloadInspection(sample: string) {
 
 async function startServer() {
   const app = express();
+  app.disable('x-powered-by');
   app.set('trust proxy', 1);
 
-  // Basic security headers
-  app.use((_req, res, next) => {
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
-    res.setHeader(
-      'Permissions-Policy',
-      'camera=(), microphone=(), geolocation=()'
-    );
-    next();
+  const HONEYPOT_DECOY_PATHS = [
+    '/wp-admin',
+    '/wp-login.php',
+    '/phpmyadmin',
+    '/.env',
+    '/admin-backup',
+    '/api/v1/export-all-users',
+    '/api/debug/secrets',
+  ];
+
+  // Lapisan Keamanan Lengkap (WAF, Scanner/Probe Blocker, Rate Limit Baca/Tulis, Auto-Ban, CSP, Security Headers, security.txt)
+  const { preGuard, bodyWafGuard } = createSecurityMiddleware({
+    securityContact: `mailto:${SERVER_SUPER_ADMIN_EMAIL}`,
+    wafBodyExemptPaths: [
+      '/api/security/inspect-payload',
+      '/api/security/intrusion-alert',
+      '/api/security/analyze-threats',
+    ],
+    honeypotPaths: HONEYPOT_DECOY_PATHS,
+    onIncident: (inc) => {
+      recordServerIntrusion(
+        inc.ip,
+        inc.path,
+        inc.jenisAncaman,
+        inc.taktikPengelabuan,
+        inc.tingkat
+      );
+    },
   });
 
+  app.use(preGuard);
   app.use(express.json({ limit: '1mb' }));
+  app.use(bodyWafGuard);
 
   // 1. Server-side Super Admin Authentication (with brute-force lockout)
   app.post('/api/auth/superadmin', (req, res) => {
