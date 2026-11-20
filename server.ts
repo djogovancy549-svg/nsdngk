@@ -102,6 +102,271 @@ function isAuthorizedSuperAdminEmail(email: string): boolean {
   );
 }
 
+// Persistent Server Secrets (SESSION_SECRET & APPS_SCRIPT_SECRET — never shipped to browser bundle)
+const SECRETS_FILE_PATH = path.resolve(__dirname, 'data', 'server-secrets.json');
+interface ServerSecrets {
+  sessionSecret: string;
+  appsScriptSecret: string;
+}
+
+function loadOrCreateServerSecrets(): ServerSecrets {
+  let stored: Partial<ServerSecrets> = {};
+  try {
+    if (fs.existsSync(SECRETS_FILE_PATH)) {
+      stored = JSON.parse(fs.readFileSync(SECRETS_FILE_PATH, 'utf8'));
+    }
+  } catch {
+    stored = {};
+  }
+
+  const sessionSecret =
+    process.env.SESSION_SECRET?.trim() ||
+    stored.sessionSecret ||
+    crypto.randomBytes(32).toString('hex');
+  const appsScriptSecret =
+    process.env.APPS_SCRIPT_SECRET?.trim() ||
+    stored.appsScriptSecret ||
+    `SDK-${crypto.randomBytes(18).toString('hex').toUpperCase()}`;
+
+  const next: ServerSecrets = { sessionSecret, appsScriptSecret };
+  if (
+    stored.sessionSecret !== sessionSecret ||
+    stored.appsScriptSecret !== appsScriptSecret
+  ) {
+    try {
+      const dir = path.dirname(SECRETS_FILE_PATH);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(SECRETS_FILE_PATH, JSON.stringify(next, null, 2), 'utf8');
+    } catch {
+      // Abaikan jika filesystem read-only
+    }
+  }
+  return next;
+}
+
+let serverSecrets: ServerSecrets = loadOrCreateServerSecrets();
+
+// Signed HttpOnly Session Cookie (HMAC-SHA256)
+const SESSION_COOKIE_NAME = 'sd_sovereign_session';
+const SESSION_TTL_MS = 12 * 60 * 60 * 1000; // 12 jam
+
+interface SignedSessionPayload {
+  email: string;
+  role: 'super_admin' | 'opd';
+  exp: number;
+}
+
+function createSignedSessionToken(payload: SignedSessionPayload): string {
+  const data = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+  const sig = crypto
+    .createHmac('sha256', serverSecrets.sessionSecret)
+    .update(data)
+    .digest('base64url');
+  return `${data}.${sig}`;
+}
+
+function verifySignedSessionToken(token: string): SignedSessionPayload | null {
+  if (!token || !token.includes('.')) return null;
+  const [data, sig] = token.split('.');
+  if (!data || !sig) return null;
+  const expectedSig = crypto
+    .createHmac('sha256', serverSecrets.sessionSecret)
+    .update(data)
+    .digest('base64url');
+  if (!timingSafeEqualStr(sig, expectedSig)) return null;
+  try {
+    const parsed = JSON.parse(
+      Buffer.from(data, 'base64url').toString('utf8')
+    ) as SignedSessionPayload;
+    if (!parsed.email || !parsed.role || !parsed.exp) return null;
+    if (Date.now() > parsed.exp) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function parseCookies(req: express.Request): Record<string, string> {
+  const raw = req.headers.cookie || '';
+  const map: Record<string, string> = {};
+  raw.split(';').forEach((pair) => {
+    const idx = pair.indexOf('=');
+    if (idx > 0) {
+      const key = pair.slice(0, idx).trim();
+      const val = pair.slice(idx + 1).trim();
+      map[key] = decodeURIComponent(val);
+    }
+  });
+  return map;
+}
+
+function setSignedSessionCookie(
+  res: express.Response,
+  payload: Omit<SignedSessionPayload, 'exp'>
+): void {
+  const token = createSignedSessionToken({
+    ...payload,
+    exp: Date.now() + SESSION_TTL_MS,
+  });
+  const secureFlag = isProd ? '; Secure' : '';
+  res.setHeader(
+    'Set-Cookie',
+    `${SESSION_COOKIE_NAME}=${encodeURIComponent(
+      token
+    )}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${Math.floor(
+      SESSION_TTL_MS / 1000
+    )}${secureFlag}`
+  );
+}
+
+function clearSignedSessionCookie(res: express.Response): void {
+  const secureFlag = isProd ? '; Secure' : '';
+  res.setHeader(
+    'Set-Cookie',
+    `${SESSION_COOKIE_NAME}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${secureFlag}`
+  );
+}
+
+// White-Label Multi-Kabupaten Sovereign Configuration
+const REGENCY_CONFIG_PATH = path.resolve(
+  __dirname,
+  'data',
+  'regency-config.json'
+);
+
+interface RegencyWhiteLabelConfig {
+  namaKabupaten: string;
+  namaPortal: string;
+  namaWalidata: string;
+  domainResmi: string;
+  urlPortalPublik: string;
+  daftarKecamatan: string[];
+  updatedAt: string;
+}
+
+const DEFAULT_REGENCY_CONFIG: RegencyWhiteLabelConfig = {
+  namaKabupaten: process.env.REGENCY_NAME || 'Kabupaten Nagekeo',
+  namaPortal: process.env.PORTAL_NAME || 'Satu Data Nagekeo',
+  namaWalidata: process.env.WALIDATA_NAME || 'Diskominfo Kabupaten Nagekeo',
+  domainResmi: process.env.REGENCY_DOMAIN || 'nagekeokab.go.id',
+  urlPortalPublik:
+    process.env.PUBLIC_PORTAL_URL || 'https://portalsatudata.nagekeokab.go.id',
+  daftarKecamatan: [
+    'Aesesa',
+    'Aesesa Selatan',
+    'Boawae',
+    'Keo Tengah',
+    'Mauponggo',
+    'Nangaroro',
+    'Wolowae',
+  ],
+  updatedAt: new Date().toISOString(),
+};
+
+function loadRegencyConfig(): RegencyWhiteLabelConfig {
+  try {
+    if (fs.existsSync(REGENCY_CONFIG_PATH)) {
+      const parsed = JSON.parse(fs.readFileSync(REGENCY_CONFIG_PATH, 'utf8'));
+      return {
+        ...DEFAULT_REGENCY_CONFIG,
+        ...parsed,
+        daftarKecamatan: Array.isArray(parsed.daftarKecamatan)
+          ? parsed.daftarKecamatan.filter(Boolean)
+          : DEFAULT_REGENCY_CONFIG.daftarKecamatan,
+      };
+    }
+  } catch {
+    // Fallback ke default
+  }
+  return DEFAULT_REGENCY_CONFIG;
+}
+
+function saveRegencyConfig(
+  next: Partial<RegencyWhiteLabelConfig>
+): RegencyWhiteLabelConfig {
+  const current = loadRegencyConfig();
+  const merged: RegencyWhiteLabelConfig = {
+    namaKabupaten:
+      String(next.namaKabupaten ?? current.namaKabupaten).trim() ||
+      DEFAULT_REGENCY_CONFIG.namaKabupaten,
+    namaPortal:
+      String(next.namaPortal ?? current.namaPortal).trim() ||
+      DEFAULT_REGENCY_CONFIG.namaPortal,
+    namaWalidata:
+      String(next.namaWalidata ?? current.namaWalidata).trim() ||
+      DEFAULT_REGENCY_CONFIG.namaWalidata,
+    domainResmi:
+      String(next.domainResmi ?? current.domainResmi).trim() ||
+      DEFAULT_REGENCY_CONFIG.domainResmi,
+    urlPortalPublik: String(
+      next.urlPortalPublik ?? current.urlPortalPublik
+    ).trim(),
+    daftarKecamatan: Array.isArray(next.daftarKecamatan)
+      ? next.daftarKecamatan.map((k) => String(k).trim()).filter(Boolean)
+      : current.daftarKecamatan,
+    updatedAt: new Date().toISOString(),
+  };
+  try {
+    const dir = path.dirname(REGENCY_CONFIG_PATH);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      REGENCY_CONFIG_PATH,
+      JSON.stringify(merged, null, 2),
+      'utf8'
+    );
+  } catch {
+    // Abaikan
+  }
+  return merged;
+}
+
+let activeRegencyConfig: RegencyWhiteLabelConfig = loadRegencyConfig();
+
+// Smart Server Cache + In-Flight Deduplication for Google Apps Script Proxy
+interface SheetProxyCacheEntry {
+  data: unknown;
+  expiresAt: number;
+  cachedAt: number;
+  webhookUrl: string;
+}
+const SHEET_CACHE_TTL_MS = 45 * 1000; // 45 detik
+const sheetProxyCache = new Map<string, SheetProxyCacheEntry>();
+const sheetInFlight = new Map<string, Promise<{ status: number; data: unknown; latencyMs: number }>>();
+const sheetProxyStats = {
+  cacheHits: 0,
+  cacheMisses: 0,
+  writeInvalidations: 0,
+  blockedSsrf: 0,
+  totalUpstreamMs: 0,
+  upstreamCalls: 0,
+  totalCacheMs: 0,
+};
+
+function isAllowedGoogleScriptUrl(rawUrl: string): boolean {
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol !== 'https:') return false;
+    return (
+      parsed.hostname === 'script.google.com' &&
+      parsed.pathname.startsWith('/macros/s/')
+    );
+  } catch {
+    return false;
+  }
+}
+
+function invalidateSheetCacheByWebhook(webhookUrl: string): number {
+  let removed = 0;
+  for (const [key, entry] of sheetProxyCache.entries()) {
+    if (entry.webhookUrl === webhookUrl) {
+      sheetProxyCache.delete(key);
+      removed++;
+    }
+  }
+  if (removed > 0) sheetProxyStats.writeInvalidations += removed;
+  return removed;
+}
+
 function timingSafeEqualStr(a: string, b: string): boolean {
   const bufA = Buffer.from(a, 'utf8');
   const bufB = Buffer.from(b, 'utf8');
@@ -441,6 +706,10 @@ async function startServer() {
       timingSafeEqualStr(password.trim(), SERVER_SUPER_ADMIN_PASSWORD)
     ) {
       loginAttemptsByIp.delete(ip);
+      setSignedSessionCookie(res, {
+        email: identifier,
+        role: 'super_admin',
+      });
       return res.status(200).json({
         ok: true,
         isSuperAdminCandidate: true,
@@ -451,7 +720,7 @@ async function startServer() {
           email: identifier,
           namaLengkap: 'Super Admin Walidata',
           opdId: null,
-          namaOpd: 'Diskominfo Kabupaten Nagekeo',
+          namaOpd: activeRegencyConfig.namaWalidata,
         },
       });
     }
@@ -492,16 +761,53 @@ async function startServer() {
     });
   });
 
-  // 1a. Manajemen Daftar Email Resmi Super Admin (Allowlist)
+  // 1a. Manajemen Sesi HttpOnly & Daftar Email Resmi Super Admin (Allowlist)
+  app.post('/api/auth/logout', (_req, res) => {
+    clearSignedSessionCookie(res);
+    return res.json({ ok: true });
+  });
+
+  app.get('/api/auth/session', (req, res) => {
+    const cookies = parseCookies(req);
+    const token = cookies[SESSION_COOKIE_NAME];
+    const verified = token ? verifySignedSessionToken(token) : null;
+    if (!verified) {
+      return res.status(200).json({ ok: false, authenticated: false });
+    }
+    return res.status(200).json({
+      ok: true,
+      authenticated: true,
+      role: verified.role,
+      email: verified.email,
+      expiresAt: verified.exp,
+    });
+  });
+
   const requireSuperAdminActor = (
     req: express.Request,
     res: express.Response
   ): string | null => {
+    // 1. Utamakan cookie sesi HttpOnly bertanda tangan HMAC-SHA256
+    const cookies = parseCookies(req);
+    const cookieToken = cookies[SESSION_COOKIE_NAME];
+    if (cookieToken) {
+      const verified = verifySignedSessionToken(cookieToken);
+      if (
+        verified &&
+        verified.role === 'super_admin' &&
+        isAuthorizedSuperAdminEmail(verified.email)
+      ) {
+        return verified.email;
+      }
+    }
+
+    // 2. Fallback header terotorisasi (untuk kompatibilitas preview iframe lintas-origin)
     const actorEmail = normalizeEmail(req.headers['x-superadmin-email']);
     if (!isAuthorizedSuperAdminEmail(actorEmail)) {
       res.status(403).json({
         ok: false,
-        message: 'Hanya Super Admin dengan email terotorisasi yang dapat mengelola daftar ini.',
+        message:
+          'Hanya Super Admin dengan sesi/email terotorisasi yang dapat mengakses kontrol ini.',
       });
       return null;
     }
@@ -572,6 +878,275 @@ async function startServer() {
       primaryEmail: SERVER_SUPER_ADMIN_EMAIL,
       allowedEmails: superAdminAllowedEmails,
       message: `Akses Super Admin untuk email ${targetEmail} berhasil dicabut.`,
+    });
+  });
+
+  // 1a-2. Konfigurasi White-Label Multi-Kabupaten (Kedaulatan Penuh Per-Kabupaten)
+  app.get('/api/config/regency', (_req, res) => {
+    return res.json({
+      ok: true,
+      config: activeRegencyConfig,
+    });
+  });
+
+  app.put('/api/config/regency', (req, res) => {
+    if (!requireSuperAdminActor(req, res)) return;
+    const body = req.body || {};
+    const kecamatanRaw = Array.isArray(body.daftarKecamatan)
+      ? body.daftarKecamatan
+      : typeof body.daftarKecamatan === 'string'
+      ? body.daftarKecamatan.split(',')
+      : undefined;
+
+    activeRegencyConfig = saveRegencyConfig({
+      namaKabupaten: body.namaKabupaten,
+      namaPortal: body.namaPortal,
+      namaWalidata: body.namaWalidata,
+      domainResmi: body.domainResmi,
+      urlPortalPublik: body.urlPortalPublik,
+      daftarKecamatan: kecamatanRaw,
+    });
+
+    return res.json({
+      ok: true,
+      config: activeRegencyConfig,
+      message: `Identitas kabupaten "${activeRegencyConfig.namaKabupaten}" berhasil disimpan.`,
+    });
+  });
+
+  // 1a-3. Secure Backend Proxy + Smart Cache + Shared Secret untuk Google Apps Script (/exec)
+  app.post('/api/sheets/proxy', async (req, res) => {
+    const ip = getClientIp(req);
+    const method = String(req.body?.method || 'GET').toUpperCase();
+    const webhookUrl = String(req.body?.webhookUrl || '').trim();
+    const sheetName = String(req.body?.sheetName || '').trim();
+    const action = String(req.body?.action || 'list').trim();
+    const bypassCache = Boolean(req.body?.bypassCache);
+    const payload =
+      req.body?.payload && typeof req.body.payload === 'object'
+        ? (req.body.payload as Record<string, unknown>)
+        : {};
+
+    if (!isAllowedGoogleScriptUrl(webhookUrl)) {
+      sheetProxyStats.blockedSsrf++;
+      recordServerIntrusion(
+        ip,
+        '/api/sheets/proxy',
+        'Percobaan SSRF pada Proxy Google Sheet',
+        `Memblokir URL tidak sah pada proxy sheet: "${webhookUrl.slice(0, 80)}".`,
+        'Kritis'
+      );
+      return res.status(400).json({
+        ok: false,
+        error:
+          'URL Webhook ditolak. Hanya endpoint resmi Google Apps Script (https://script.google.com/macros/s/...) yang diizinkan.',
+      });
+    }
+
+    // GET request: gunakan Smart Cache (45 detik) + In-Flight Deduplication
+    if (method === 'GET') {
+      const cacheKey = `${webhookUrl}::${sheetName}::${action}`;
+      const now = Date.now();
+      const startMs = Date.now();
+
+      if (!bypassCache) {
+        const cached = sheetProxyCache.get(cacheKey);
+        if (cached && cached.expiresAt > now) {
+          sheetProxyStats.cacheHits++;
+          const hitMs = Math.max(1, Date.now() - startMs);
+          sheetProxyStats.totalCacheMs += hitMs;
+          res.setHeader('X-SatuData-Cache', 'HIT');
+          return res.status(200).json({
+            ok: true,
+            cached: true,
+            latencyMs: hitMs,
+            data: cached.data,
+          });
+        }
+      }
+
+      sheetProxyStats.cacheMisses++;
+
+      let inFlight = sheetInFlight.get(cacheKey);
+      if (!inFlight) {
+        inFlight = (async () => {
+          const reqStart = Date.now();
+          const targetUrl = new URL(webhookUrl);
+          targetUrl.searchParams.set('action', action);
+          if (sheetName) targetUrl.searchParams.set('sheet', sheetName);
+          // Sisipkan kunci rahasia server secara otomatis (tidak pernah terekspos ke browser)
+          targetUrl.searchParams.set('secret', serverSecrets.appsScriptSecret);
+
+          const upstream = await fetch(targetUrl.toString(), {
+            method: 'GET',
+            headers: { Accept: 'application/json' },
+            redirect: 'follow',
+          });
+          const latencyMs = Date.now() - reqStart;
+          sheetProxyStats.totalUpstreamMs += latencyMs;
+          sheetProxyStats.upstreamCalls++;
+
+          const text = await upstream.text();
+          let parsed: unknown = null;
+          try {
+            parsed = JSON.parse(text);
+          } catch {
+            parsed = { ok: false, error: 'Respons Google Apps Script bukan JSON valid.' };
+          }
+          return { status: upstream.status, data: parsed, latencyMs };
+        })().finally(() => {
+          sheetInFlight.delete(cacheKey);
+        });
+        sheetInFlight.set(cacheKey, inFlight);
+      }
+
+      try {
+        const result = await inFlight;
+        if (
+          result.status >= 200 &&
+          result.status < 300 &&
+          result.data &&
+          typeof result.data === 'object' &&
+          (result.data as { ok?: boolean }).ok
+        ) {
+          sheetProxyCache.set(cacheKey, {
+            data: result.data,
+            cachedAt: Date.now(),
+            expiresAt: Date.now() + SHEET_CACHE_TTL_MS,
+            webhookUrl,
+          });
+        }
+        res.setHeader('X-SatuData-Cache', 'MISS');
+        return res.status(result.status >= 400 ? result.status : 200).json({
+          ok: result.status >= 200 && result.status < 300,
+          cached: false,
+          latencyMs: result.latencyMs,
+          data: result.data,
+        });
+      } catch (err) {
+        return res.status(502).json({
+          ok: false,
+          error: `Gagal menghubungi Google Apps Script: ${
+            err instanceof Error ? err.message : 'Network error'
+          }`,
+        });
+      }
+    }
+
+    // POST mutation (create/update/delete): sisipkan secret server & hapus cache terkait
+    if (method === 'POST') {
+      const reqStart = Date.now();
+      try {
+        const upstream = await fetch(webhookUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+          redirect: 'follow',
+          body: JSON.stringify({
+            ...payload,
+            action,
+            sheetName,
+            secret: serverSecrets.appsScriptSecret,
+          }),
+        });
+        const latencyMs = Date.now() - reqStart;
+        invalidateSheetCacheByWebhook(webhookUrl);
+
+        const text = await upstream.text();
+        let parsed: unknown = null;
+        try {
+          parsed = JSON.parse(text);
+        } catch {
+          parsed = { ok: upstream.ok };
+        }
+        return res.status(upstream.ok ? 200 : upstream.status).json({
+          ok: upstream.ok,
+          latencyMs,
+          data: parsed,
+        });
+      } catch (err) {
+        return res.status(502).json({
+          ok: false,
+          error: `Gagal mengirim data ke Google Apps Script: ${
+            err instanceof Error ? err.message : 'Network error'
+          }`,
+        });
+      }
+    }
+
+    return res.status(405).json({ ok: false, error: 'Metode proxy tidak didukung.' });
+  });
+
+  app.get('/api/sheets/proxy/stats', (req, res) => {
+    if (!requireSuperAdminActor(req, res)) return;
+    const totalReads = sheetProxyStats.cacheHits + sheetProxyStats.cacheMisses;
+    const hitRatePct =
+      totalReads > 0
+        ? Math.round((sheetProxyStats.cacheHits / totalReads) * 100)
+        : 0;
+    const avgUpstreamMs =
+      sheetProxyStats.upstreamCalls > 0
+        ? Math.round(
+            sheetProxyStats.totalUpstreamMs / sheetProxyStats.upstreamCalls
+          )
+        : 0;
+    const avgCacheMs =
+      sheetProxyStats.cacheHits > 0
+        ? Math.round(sheetProxyStats.totalCacheMs / sheetProxyStats.cacheHits)
+        : 0;
+
+    return res.json({
+      ok: true,
+      appsScriptSecret: serverSecrets.appsScriptSecret,
+      cacheTtlSec: Math.round(SHEET_CACHE_TTL_MS / 1000),
+      cachedEntries: sheetProxyCache.size,
+      cacheHits: sheetProxyStats.cacheHits,
+      cacheMisses: sheetProxyStats.cacheMisses,
+      hitRatePct,
+      writeInvalidations: sheetProxyStats.writeInvalidations,
+      blockedSsrf: sheetProxyStats.blockedSsrf,
+      avgUpstreamMs,
+      avgCacheMs,
+    });
+  });
+
+  app.post('/api/sheets/proxy/cache/clear', (req, res) => {
+    if (!requireSuperAdminActor(req, res)) return;
+    const count = sheetProxyCache.size;
+    sheetProxyCache.clear();
+    return res.json({
+      ok: true,
+      cleared: count,
+      message: `${count} entri cache Google Sheet berhasil dibersihkan.`,
+    });
+  });
+
+  app.post('/api/sheets/proxy/rotate-secret', (req, res) => {
+    if (!requireSuperAdminActor(req, res)) return;
+    const nextSecret = `SDK-${crypto
+      .randomBytes(18)
+      .toString('hex')
+      .toUpperCase()}`;
+    serverSecrets = {
+      ...serverSecrets,
+      appsScriptSecret: nextSecret,
+    };
+    try {
+      const dir = path.dirname(SECRETS_FILE_PATH);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(
+        SECRETS_FILE_PATH,
+        JSON.stringify(serverSecrets, null, 2),
+        'utf8'
+      );
+    } catch {
+      // Abaikan
+    }
+    sheetProxyCache.clear();
+    return res.json({
+      ok: true,
+      appsScriptSecret: nextSecret,
+      message:
+        'Kunci Rahasia Webhook (API_SECRET) baru berhasil dibuat. Perbarui konstanta API_SECRET di Code.gs jika mengaktifkan kunci ketat.',
     });
   });
 

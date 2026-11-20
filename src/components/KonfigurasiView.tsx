@@ -1,12 +1,17 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
+  Building2,
   Check,
   CheckCircle2,
   Copy,
   ExternalLink,
+  KeyRound,
   RefreshCw,
   Save,
+  ShieldCheck,
+  Trash2,
   Wrench,
+  Zap,
 } from 'lucide-react';
 import {
   APPS_SCRIPT_AUTH_TEMPLATE,
@@ -19,8 +24,106 @@ import {
   testAuthSheetConnection,
 } from '../services/authSheetService';
 import { extractGoogleSheetId } from '../services/dynamicSheetService';
+import {
+  clearSheetProxyCache,
+  fetchSheetProxyStats,
+  RegencyWhiteLabelConfig,
+  rotateAppsScriptSecret,
+  SheetProxyStats,
+  updateRegencyConfig,
+} from '../services/regencyConfigService';
 
-export function KonfigurasiView() {
+interface KonfigurasiViewProps {
+  currentSuperAdminEmail: string;
+  regencyConfig: RegencyWhiteLabelConfig;
+  onRegencyConfigUpdated: (next: RegencyWhiteLabelConfig) => void;
+}
+
+export function KonfigurasiView({
+  currentSuperAdminEmail,
+  regencyConfig,
+  onRegencyConfigUpdated,
+}: KonfigurasiViewProps) {
+  // White-Label Multi-Kabupaten state
+  const [namaKabupaten, setNamaKabupaten] = useState(
+    regencyConfig.namaKabupaten
+  );
+  const [namaPortal, setNamaPortal] = useState(regencyConfig.namaPortal);
+  const [namaWalidata, setNamaWalidata] = useState(regencyConfig.namaWalidata);
+  const [domainResmi, setDomainResmi] = useState(regencyConfig.domainResmi);
+  const [urlPortalPublik, setUrlPortalPublik] = useState(
+    regencyConfig.urlPortalPublik
+  );
+  const [kecamatanText, setKecamatanText] = useState(
+    regencyConfig.daftarKecamatan.join(', ')
+  );
+  const [savingRegency, setSavingRegency] = useState(false);
+  const [regencyFeedback, setRegencyFeedback] = useState<{
+    type: 'success' | 'error';
+    text: string;
+  } | null>(null);
+
+  // Proxy Cache & Secret state
+  const [proxyStats, setProxyStats] = useState<SheetProxyStats | null>(null);
+  const [loadingProxy, setLoadingProxy] = useState(false);
+  const [proxyMessage, setProxyMessage] = useState<string | null>(null);
+
+  const loadProxyStats = async () => {
+    setLoadingProxy(true);
+    try {
+      const stats = await fetchSheetProxyStats(currentSuperAdminEmail);
+      setProxyStats(stats);
+    } finally {
+      setLoadingProxy(false);
+    }
+  };
+
+  useEffect(() => {
+    loadProxyStats();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentSuperAdminEmail]);
+
+  const handleSaveRegency = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setRegencyFeedback(null);
+    setSavingRegency(true);
+    try {
+      const daftarKecamatan = kecamatanText
+        .split(',')
+        .map((k) => k.trim())
+        .filter(Boolean);
+      const res = await updateRegencyConfig(currentSuperAdminEmail, {
+        namaKabupaten,
+        namaPortal,
+        namaWalidata,
+        domainResmi,
+        urlPortalPublik,
+        daftarKecamatan,
+      });
+      onRegencyConfigUpdated(res.config);
+      setRegencyFeedback({
+        type: res.ok ? 'success' : 'error',
+        text: res.message,
+      });
+    } finally {
+      setSavingRegency(false);
+    }
+  };
+
+  const handleClearProxyCache = async () => {
+    setProxyMessage(null);
+    const res = await clearSheetProxyCache(currentSuperAdminEmail);
+    setProxyMessage(res.message);
+    await loadProxyStats();
+  };
+
+  const handleRotateSecret = async () => {
+    setProxyMessage(null);
+    const res = await rotateAppsScriptSecret(currentSuperAdminEmail);
+    setProxyMessage(res.message);
+    await loadProxyStats();
+  };
+
   const initialCfg = getActiveAuthSheetConfig();
   const [sheetUrl, setSheetUrl] = useState(
     isPlaceholderEndpoint(initialCfg.sheetUrl) ? '' : initialCfg.sheetUrl
@@ -126,14 +229,334 @@ export function KonfigurasiView() {
     <div className="space-y-8">
       <div>
         <h1 className="text-2xl font-semibold tracking-tight text-slate-900">
-          Pengaturan Google Sheet Akun &amp; Skrip Code.gs
+          Konfigurasi Kabupaten, Proxy Keamanan &amp; Skrip Code.gs
         </h1>
         <p className="mt-1 text-sm text-slate-600 max-w-3xl">
-          Daftarkan Google Sheet milik Super Admin sebagai basis data akun
-          operator OPD, lalu gunakan skrip universal untuk dicangkokkan ke Sheet
-          masing-masing OPD.
+          Sesuaikan identitas daerah (siap pakai lintas kabupaten dengan
+          kedaulatan data penuh), kelola kunci rahasia Proxy Google Drive/Sheet
+          &amp; akselerator cache server, serta atur Google Sheet Akun OPD.
         </p>
       </div>
+
+      {/* SECTION A: IDENTITAS KABUPATEN (WHITE-LABEL MULTI-KABUPATEN) */}
+      <section className="bg-white border border-slate-200 rounded-lg overflow-hidden">
+        <div className="px-6 py-4 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-start gap-2.5">
+            <div className="w-8 h-8 rounded-md bg-[#0B1B2B] text-teal-400 flex items-center justify-center shrink-0 mt-0.5">
+              <Building2 className="w-4 h-4" />
+            </div>
+            <div>
+              <h2 className="text-base font-semibold text-slate-900">
+                Identitas Kabupaten &amp; Kedaulatan Instansi (White-Label)
+              </h2>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Ubah nama kabupaten, nama portal, walidata, daftar kecamatan,
+                dan tautan portal publik terpisah tanpa mengubah kode aplikasi.
+              </p>
+            </div>
+          </div>
+          {urlPortalPublik && (
+            <a
+              href={urlPortalPublik}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 h-8 px-3 text-xs font-medium text-teal-700 bg-teal-50 border border-teal-200 rounded-md hover:bg-teal-100 whitespace-nowrap shrink-0"
+            >
+              <ExternalLink className="w-3.5 h-3.5" />
+              Buka Portal Publik
+            </a>
+          )}
+        </div>
+
+        <form onSubmit={handleSaveRegency} className="p-6 space-y-4">
+          {regencyFeedback && (
+            <div
+              className={`p-3 text-xs rounded-md border ${
+                regencyFeedback.type === 'success'
+                  ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                  : 'bg-red-50 border-red-200 text-red-700'
+              }`}
+            >
+              {regencyFeedback.text}
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div>
+              <label
+                htmlFor="cfg-kab"
+                className="block text-xs font-medium text-slate-700 mb-1"
+              >
+                Nama Kabupaten / Kota
+              </label>
+              <input
+                id="cfg-kab"
+                type="text"
+                value={namaKabupaten}
+                onChange={(e) => setNamaKabupaten(e.target.value)}
+                placeholder="Kabupaten Nagekeo"
+                className="w-full h-10 px-3 text-sm bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
+                required
+              />
+            </div>
+            <div>
+              <label
+                htmlFor="cfg-portal"
+                className="block text-xs font-medium text-slate-700 mb-1"
+              >
+                Nama Aplikasi Portal
+              </label>
+              <input
+                id="cfg-portal"
+                type="text"
+                value={namaPortal}
+                onChange={(e) => setNamaPortal(e.target.value)}
+                placeholder="Satu Data Nagekeo"
+                className="w-full h-10 px-3 text-sm bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
+                required
+              />
+            </div>
+            <div>
+              <label
+                htmlFor="cfg-walidata"
+                className="block text-xs font-medium text-slate-700 mb-1"
+              >
+                Instansi Walidata
+              </label>
+              <input
+                id="cfg-walidata"
+                type="text"
+                value={namaWalidata}
+                onChange={(e) => setNamaWalidata(e.target.value)}
+                placeholder="Diskominfo Kabupaten Nagekeo"
+                className="w-full h-10 px-3 text-sm bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
+                required
+              />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label
+                htmlFor="cfg-domain"
+                className="block text-xs font-medium text-slate-700 mb-1"
+              >
+                Domain Resmi Daerah
+              </label>
+              <input
+                id="cfg-domain"
+                type="text"
+                value={domainResmi}
+                onChange={(e) => setDomainResmi(e.target.value)}
+                placeholder="nagekeokab.go.id"
+                className="w-full h-10 px-3 text-sm font-mono bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
+              />
+            </div>
+            <div>
+              <label
+                htmlFor="cfg-public-url"
+                className="block text-xs font-medium text-slate-700 mb-1"
+              >
+                URL Portal Publik Terpisah (Untuk Masyarakat Umum)
+              </label>
+              <input
+                id="cfg-public-url"
+                type="url"
+                value={urlPortalPublik}
+                onChange={(e) => setUrlPortalPublik(e.target.value)}
+                placeholder="https://portalsatudata.nagekeokab.go.id"
+                className="w-full h-10 px-3 text-sm font-mono bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
+              />
+            </div>
+          </div>
+
+          <div>
+            <label
+              htmlFor="cfg-kecamatan"
+              className="block text-xs font-medium text-slate-700 mb-1"
+            >
+              Daftar Kecamatan (pisahkan dengan koma — otomatis jadi saran input
+              OPD)
+            </label>
+            <input
+              id="cfg-kecamatan"
+              type="text"
+              value={kecamatanText}
+              onChange={(e) => setKecamatanText(e.target.value)}
+              placeholder="Aesesa, Boawae, Mauponggo, Nangaroro..."
+              className="w-full h-10 px-3 text-sm bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
+            />
+          </div>
+
+          <div className="flex justify-end">
+            <button
+              type="submit"
+              disabled={savingRegency}
+              className="inline-flex items-center gap-1.5 h-9 px-4 text-xs font-semibold text-white bg-[#0B1B2B] rounded-md hover:bg-slate-800 disabled:opacity-60"
+            >
+              <Save className="w-3.5 h-3.5" />
+              {savingRegency
+                ? 'Menyimpan...'
+                : 'Simpan Identitas Kabupaten'}
+            </button>
+          </div>
+        </form>
+      </section>
+
+      {/* SECTION B: KEAMANAN PROXY GOOGLE SHEET (API_SECRET) & AKSELERATOR CACHE SERVER */}
+      <section className="bg-white border border-slate-200 rounded-lg overflow-hidden">
+        <div className="px-6 py-4 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-start gap-2.5">
+            <div className="w-8 h-8 rounded-md bg-teal-700 text-white flex items-center justify-center shrink-0 mt-0.5">
+              <Zap className="w-4 h-4" />
+            </div>
+            <div>
+              <h2 className="text-base font-semibold text-slate-900">
+                Proxy Aman Google Drive/Sheet, Kunci API_SECRET &amp; Smart Cache
+              </h2>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Menutup celah akses langsung URL Apps Script, menyisipkan kunci
+                rahasia dari server, mencegah SSRF, dan mempercepat pembacaan
+                sheet hingga puluhan kali lipat dengan cache otomatis 45 detik.
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={loadProxyStats}
+              disabled={loadingProxy}
+              className="inline-flex items-center gap-1.5 h-8 px-3 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-md hover:bg-slate-50"
+            >
+              <RefreshCw
+                className={`w-3.5 h-3.5 ${loadingProxy ? 'animate-spin' : ''}`}
+              />
+              Segarkan
+            </button>
+            <button
+              type="button"
+              onClick={handleClearProxyCache}
+              className="inline-flex items-center gap-1.5 h-8 px-3 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-md hover:bg-slate-50"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              Bersihkan Cache
+            </button>
+          </div>
+        </div>
+
+        <div className="p-6 space-y-5">
+          {proxyMessage && (
+            <div className="p-3 text-xs bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-md">
+              {proxyMessage}
+            </div>
+          )}
+
+          {/* KPI Performa Cache & Proteksi */}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-md">
+              <p className="text-[11px] font-medium text-slate-500">
+                Rasio Cache Hit
+              </p>
+              <p className="mt-1 text-xl font-semibold font-mono tabular-nums text-teal-700">
+                {proxyStats ? `${proxyStats.hitRatePct}%` : '—'}
+              </p>
+              <p className="text-[11px] text-slate-500 mt-0.5">
+                {proxyStats
+                  ? `${proxyStats.cacheHits} hit / ${proxyStats.cacheMisses} miss`
+                  : 'Menunggu sinkronisasi'}
+              </p>
+            </div>
+            <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-md">
+              <p className="text-[11px] font-medium text-slate-500">
+                Kecepatan Cache vs Sheet
+              </p>
+              <p className="mt-1 text-xl font-semibold font-mono tabular-nums text-slate-900">
+                {proxyStats ? `${proxyStats.avgCacheMs} ms` : '—'}
+              </p>
+              <p className="text-[11px] text-slate-500 mt-0.5">
+                Google Sheet: {proxyStats ? `${proxyStats.avgUpstreamMs} ms` : '—'}
+              </p>
+            </div>
+            <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-md">
+              <p className="text-[11px] font-medium text-slate-500">
+                Sheet Aktif di Cache
+              </p>
+              <p className="mt-1 text-xl font-semibold font-mono tabular-nums text-slate-900">
+                {proxyStats ? proxyStats.cachedEntries : 0}
+              </p>
+              <p className="text-[11px] text-slate-500 mt-0.5">
+                TTL {proxyStats?.cacheTtlSec ?? 45} dtk · Auto-refresh saat input
+              </p>
+            </div>
+            <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-md">
+              <p className="text-[11px] font-medium text-slate-500">
+                Sesi &amp; Anti-SSRF
+              </p>
+              <p className="mt-1 text-sm font-semibold text-emerald-700 inline-flex items-center gap-1">
+                <ShieldCheck className="w-4 h-4" />
+                HttpOnly HMAC
+              </p>
+              <p className="text-[11px] text-slate-500 mt-0.5">
+                {proxyStats?.blockedSsrf ?? 0} URL ilegal diblokir
+              </p>
+            </div>
+          </div>
+
+          {/* Kunci Rahasia Webhook (API_SECRET) */}
+          <div className="p-4 bg-slate-50 border border-slate-200 rounded-md space-y-2.5">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-xs font-semibold text-slate-900">
+                <KeyRound className="w-4 h-4 text-teal-700" />
+                Kunci Rahasia Webhook Server (API_SECRET untuk Code.gs)
+              </div>
+              <div className="flex items-center gap-2">
+                {proxyStats?.appsScriptSecret && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      handleCopy(proxyStats.appsScriptSecret, 'api-secret')
+                    }
+                    className="inline-flex items-center gap-1 h-7 px-2.5 text-[11px] font-medium text-white bg-[#0B1B2B] rounded hover:bg-slate-800"
+                  >
+                    {copiedId === 'api-secret' ? (
+                      <>
+                        <Check className="w-3 h-3" />
+                        Tersalin
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3 h-3" />
+                        Salin Kunci
+                      </>
+                    )}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={handleRotateSecret}
+                  className="inline-flex items-center gap-1 h-7 px-2.5 text-[11px] font-medium text-slate-700 bg-white border border-slate-300 rounded hover:bg-slate-100"
+                >
+                  <RefreshCw className="w-3 h-3" />
+                  Rotasi Kunci
+                </button>
+              </div>
+            </div>
+            <div className="px-3 py-2 bg-white border border-slate-200 rounded font-mono text-xs text-slate-800 break-all">
+              {proxyStats?.appsScriptSecret || 'Memuat kunci rahasia server...'}
+            </div>
+            <p className="text-[11px] text-slate-600 leading-relaxed">
+              Tempel kunci di atas ke baris{' '}
+              <code className="font-mono bg-slate-200/70 px-1 rounded">
+                const API_SECRET = &apos;...&apos;;
+              </code>{' '}
+              pada <code className="font-mono">Code.gs</code> milik OPD agar URL{' '}
+              <code className="font-mono">/exec</code> tidak bisa diakses
+              langsung oleh pihak luar—hanya server resmi kabupaten Anda yang
+              otomatis menyisipkan kunci ini secara rahasia.
+            </p>
+          </div>
+        </div>
+      </section>
 
       {/* Super Admin Auth Sheet Registration Form */}
       <section className="bg-white border border-slate-200 rounded-lg overflow-hidden">

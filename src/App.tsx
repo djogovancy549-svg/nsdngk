@@ -48,6 +48,12 @@ import {
   updateCloneStatusOnKominfoSheet,
 } from './services/publishSheetService';
 import {
+  fetchRegencyConfig,
+  loadCachedRegencyConfig,
+  logoutServerSession,
+  RegencyWhiteLabelConfig,
+} from './services/regencyConfigService';
+import {
   AccountStatus,
   ActiveNavSection,
   AuditActionType,
@@ -80,6 +86,19 @@ export default function App() {
   const [session, setSession] = useState<UserSession | null>(() =>
     loadSavedSession()
   );
+  const [regencyConfig, setRegencyConfig] = useState<RegencyWhiteLabelConfig>(
+    () => loadCachedRegencyConfig()
+  );
+
+  useEffect(() => {
+    let active = true;
+    fetchRegencyConfig().then((cfg) => {
+      if (active) setRegencyConfig(cfg);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
   const [accounts, setAccounts] = useState<OpdAccount[]>(() =>
     loadLocalAccounts()
   );
@@ -274,6 +293,7 @@ export default function App() {
   };
 
   const handleLogout = () => {
+    logoutServerSession();
     setSession(null);
     saveSession(null);
     setNotice(null);
@@ -956,6 +976,7 @@ export default function App() {
   if (!session) {
     return (
       <AuthGateView
+        regencyConfig={regencyConfig}
         accounts={accounts}
         sheets={sheets}
         rowsBySheet={rowsBySheet}
@@ -1110,6 +1131,7 @@ export default function App() {
   return (
     <div className="min-h-screen flex bg-slate-50 text-slate-900">
       <Sidebar
+        portalName={regencyConfig.namaPortal}
         activeSection={activeSection}
         sheets={sheets}
         rowsBySheet={rowsBySheet}
@@ -1307,7 +1329,13 @@ export default function App() {
             />
           )}
 
-          {activeSection === 'konfigurasi' && <KonfigurasiView />}
+          {activeSection === 'konfigurasi' && (
+            <KonfigurasiView
+              currentSuperAdminEmail={session.email}
+              regencyConfig={regencyConfig}
+              onRegencyConfigUpdated={setRegencyConfig}
+            />
+          )}
 
           {activeSection === 'aktivitas' && (
             <AktivitasView

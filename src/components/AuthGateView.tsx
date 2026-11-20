@@ -13,6 +13,7 @@ import {
   OpdAccount,
   OpdDynamicSheet,
 } from '../types/satuData';
+import { RegencyWhiteLabelConfig } from '../services/regencyConfigService';
 import { HeroBannerSlider } from './HeroBannerSlider';
 import { RunningSummaryTicker } from './RunningSummaryTicker';
 
@@ -28,6 +29,7 @@ function generateDynamicChallenge() {
 }
 
 interface AuthGateViewProps {
+  regencyConfig: RegencyWhiteLabelConfig;
   accounts: OpdAccount[];
   sheets: OpdDynamicSheet[];
   rowsBySheet: Record<string, DynamicSheetRow[]>;
@@ -48,6 +50,7 @@ interface AuthGateViewProps {
 }
 
 export function AuthGateView({
+  regencyConfig,
   accounts,
   sheets,
   rowsBySheet,
@@ -274,7 +277,7 @@ export function AuthGateView({
             <ShieldCheck className="w-4 h-4 text-teal-400" />
           </div>
           <span className="font-semibold text-[15px] tracking-tight text-slate-900 whitespace-nowrap truncate">
-            Satu Data Nagekeo
+            {regencyConfig.namaPortal}
           </span>
         </div>
 
@@ -326,7 +329,7 @@ export function AuthGateView({
           <div className="lg:col-span-7 bg-white border border-slate-200 rounded-lg p-6 space-y-5">
             <div>
               <p className="text-xs font-medium text-teal-700">
-                Pemerintah Kabupaten Nagekeo · Kedaulatan Data Sektoral OPD
+                Pemerintah {regencyConfig.namaKabupaten} · Kedaulatan Data Sektoral OPD
               </p>
               <h1 className="mt-1 text-2xl font-semibold tracking-tight text-slate-900">
                 Satu Data Dinamis Berbasis Google Drive &amp; Sheet Milik OPD

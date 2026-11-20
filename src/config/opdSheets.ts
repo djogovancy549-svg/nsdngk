@@ -135,10 +135,21 @@ export function isPlaceholderEndpoint(url: string): boolean {
  * sendiri oleh OPD, sehingga formulir dan tabel web terbentuk secara dinamis.
  */
 export const APPS_SCRIPT_DYNAMIC_SHEET_TEMPLATE = `/**
- * Webhook Universal Dinamis — Satu Data Kabupaten Nagekeo (Code.gs)
+ * Webhook Universal Dinamis — Satu Data Sektoral (Code.gs)
  * Dicangkokkan pada Google Spreadsheet milik OPD (Extensions > Apps Script).
  * Otomatis mengikuti header baris 1 yang dibuat oleh OPD itu sendiri.
+ *
+ * KEAMANAN KETAT (DISARANKAN):
+ * Salin Kunci Rahasia Webhook (API_SECRET) dari menu Pengaturan > Keamanan Proxy Server
+ * lalu tempel di konstanta API_SECRET di bawah ini. Jika diisi, hanya server resmi
+ * kabupaten Anda yang dapat membaca/menulis Google Sheet ini.
  */
+const API_SECRET = '';
+
+function isSecretValid(provided) {
+  if (!API_SECRET) return true;
+  return String(provided || '') === String(API_SECRET);
+}
 
 function getTargetSheet(sheetName) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -165,6 +176,10 @@ function readHeaders(sheet) {
 
 function doGet(e) {
   try {
+    const providedSecret = (e && e.parameter && e.parameter.secret) || '';
+    if (!isSecretValid(providedSecret)) {
+      return jsonOut({ ok: false, error: 'Akses ditolak: API_SECRET tidak valid.' });
+    }
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     const action = (e && e.parameter && e.parameter.action) || 'list';
     const sheetName = (e && e.parameter && e.parameter.sheet) || '';
@@ -231,6 +246,9 @@ function doGet(e) {
 function doPost(e) {
   try {
     const body = JSON.parse(e.postData.contents);
+    if (!isSecretValid(body.secret)) {
+      return jsonOut({ ok: false, error: 'Akses ditolak: API_SECRET tidak valid.' });
+    }
     const action = body.action;
     const sheet = getTargetSheet(body.sheetName || '');
     const headers = readHeaders(sheet);

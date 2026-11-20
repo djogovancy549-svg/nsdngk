@@ -137,8 +137,69 @@ export async function fetchDynamicSheetData(
 ): Promise<FetchDynamicSheetResult> {
   const now = new Date().toISOString();
 
-  // 1. Coba dari Webhook Apps Script yang sudah dicangkokkan
+  // 1. Utamakan Secure Backend Proxy (/api/sheets/proxy) — menyisipkan API_SECRET server + Smart Cache 45 detik
   if (sheet.webhookUrl && sheet.webhookUrl.startsWith('https://script.google.com/')) {
+    try {
+      const proxyRes = await fetch('/api/sheets/proxy', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({
+          method: 'GET',
+          webhookUrl: sheet.webhookUrl,
+          sheetName: sheet.sheetName || '',
+          action: 'list',
+        }),
+      });
+
+      const ct = proxyRes.headers.get('content-type') || '';
+      if (proxyRes.ok && ct.includes('application/json')) {
+        const envelope = await proxyRes.json();
+        const json = envelope?.data;
+        if (json && json.ok && Array.isArray(json.headers)) {
+          const headers = (json.headers as unknown[])
+            .map((h) => String(h).trim())
+            .filter(Boolean);
+          const availableTabs = Array.isArray(json.availableSheets)
+            ? (json.availableSheets as unknown[])
+                .map((t) => String(t).trim())
+                .filter(Boolean)
+            : undefined;
+          const rawRows = Array.isArray(json.data) ? json.data : [];
+          const rows: DynamicSheetRow[] = rawRows.map(
+            (item: { _rowNumber?: number; values?: Record<string, unknown> }, idx: number) => {
+              const vals: Record<string, string> = {};
+              headers.forEach((h) => {
+                vals[h] = String(item?.values?.[h] ?? '');
+              });
+              return {
+                _id: `${sheet.id}-r${item._rowNumber ?? idx + 2}`,
+                _rowNumber: item._rowNumber ?? idx + 2,
+                _updatedAt: now.slice(0, 10),
+                values: vals,
+              };
+            }
+          );
+
+          saveLocalDynamicRows(sheet.id, rows);
+          const cacheTag = envelope?.cached
+            ? `Cache Server ${envelope.latencyMs ?? 1} ms`
+            : `Proxy Aman ${envelope.latencyMs ?? 0} ms`;
+          return {
+            headers,
+            rows,
+            availableTabs,
+            source: 'webhook',
+            syncedAt: now,
+            message: `Tersinkron melalui ${cacheTag} untuk Sheet "${sheet.sheetName}" (${headers.length} kolom, ${rows.length} baris).`,
+          };
+        }
+      }
+    } catch {
+      // Fallback ke pemanggilan langsung jika proxy belum tersedia
+    }
+
+    // 1b. Fallback langsung ke Webhook Apps Script
     try {
       const url = new URL(sheet.webhookUrl);
       url.searchParams.set('action', 'list');
@@ -265,6 +326,49 @@ export async function sendDynamicRowMutation(
       message:
         'Disimpan secara lokal. Webhook doPost belum dicangkokkan ke Google Sheet ini.',
     };
+  }
+
+  // 1. Kirim melalui Secure Backend Proxy (/api/sheets/proxy) — otomatis sisipkan API_SECRET & bersihkan cache terkait
+  try {
+    const proxyRes = await fetch('/api/sheets/proxy', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({
+        method: 'POST',
+        webhookUrl: sheet.webhookUrl,
+        sheetName: sheet.sheetName,
+        action,
+        payload: {
+          rowNumber: row._rowNumber,
+          values: row.values,
+        },
+      }),
+    });
+
+    const ct = proxyRes.headers.get('content-type') || '';
+    if (proxyRes.ok && ct.includes('application/json')) {
+      const envelope = await proxyRes.json();
+      const upstreamData = envelope?.data;
+      if (envelope?.ok && upstreamData?.ok !== false) {
+        const rowNumber = upstreamData?.rowNumber
+          ? Number(upstreamData.rowNumber)
+          : row._rowNumber;
+        return {
+          syncedToSheet: true,
+          rowNumber,
+          message: `Data berhasil dikirim aman melalui Proxy Server (${envelope.latencyMs ?? 0} ms) ke Google Sheet "${sheet.judulDataset}" (${sheet.namaOpd}).`,
+        };
+      }
+      if (upstreamData?.error) {
+        return {
+          syncedToSheet: false,
+          message: `Google Sheet menolak permintaan: ${upstreamData.error}`,
+        };
+      }
+    }
+  } catch {
+    // Fallback langsung jika proxy tidak terjangkau
   }
 
   try {

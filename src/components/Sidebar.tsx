@@ -19,6 +19,7 @@ import {
 } from '../types/satuData';
 
 interface SidebarProps {
+  portalName: string;
   activeSection: ActiveNavSection;
   sheets: OpdDynamicSheet[];
   rowsBySheet: Record<string, DynamicSheetRow[]>;
@@ -47,6 +48,7 @@ const NAV_ITEMS: {
 ];
 
 export function Sidebar({
+  portalName,
   activeSection,
   sheets,
   rowsBySheet,
@@ -76,7 +78,7 @@ export function Sidebar({
           </div>
           <div className="min-w-0">
             <span className="block font-semibold text-[15px] tracking-tight text-white whitespace-nowrap truncate leading-tight">
-              Satu Data Nagekeo
+              {portalName}
             </span>
             <span className="block text-[11px] text-slate-400 tracking-wide whitespace-nowrap truncate">
               Super Admin Walidata
