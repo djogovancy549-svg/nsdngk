@@ -458,7 +458,7 @@ export function KonfigurasiView({
                 type="url"
                 value={urlPortalPublik}
                 onChange={(e) => setUrlPortalPublik(e.target.value)}
-                placeholder="https://portalsatudata.nagekeokab.go.id"
+                placeholder="https://data.kabupatenanda.go.id (opsional)"
                 className="w-full h-10 px-3 text-sm font-mono bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
               />
             </div>

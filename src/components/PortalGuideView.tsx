@@ -5,7 +5,6 @@ import {
   Building2,
   CheckCircle2,
   Cpu,
-  Database,
   FileSpreadsheet,
   FolderTree,
   Layers,
@@ -446,28 +445,6 @@ export function PortalGuideView({
                 </li>
               </ul>
             </div>
-
-            {regencyConfig.urlPortalPublik && (
-              <div className="bg-slate-50 border border-slate-200 rounded-lg p-5 space-y-2">
-                <div className="flex items-center gap-2 text-xs font-semibold text-slate-900">
-                  <Database className="w-4 h-4 text-teal-700" />
-                  Pemisahan Portal Publik
-                </div>
-                <p className="text-xs text-slate-600 leading-relaxed">
-                  Portal ini difokuskan sebagai ruang input &amp; konsolidasi
-                  internal OPD/Walidata. Untuk publikasi terbuka masyarakat umum
-                  digunakan portal terpisah di:
-                </p>
-                <a
-                  href={regencyConfig.urlPortalPublik}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-block font-mono text-xs text-teal-700 underline break-all"
-                >
-                  {regencyConfig.urlPortalPublik}
-                </a>
-              </div>
-            )}
           </aside>
         </div>
       )}

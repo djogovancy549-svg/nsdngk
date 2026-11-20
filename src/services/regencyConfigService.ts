@@ -28,7 +28,7 @@ export const DEFAULT_REGENCY_CONFIG: RegencyWhiteLabelConfig = {
   namaPortal: 'Satu Data Nagekeo',
   namaWalidata: 'Diskominfo Kabupaten Nagekeo',
   domainResmi: 'nagekeokab.go.id',
-  urlPortalPublik: 'https://portalsatudata.nagekeokab.go.id',
+  urlPortalPublik: '',
   daftarKecamatan: [
     'Aesesa',
     'Aesesa Selatan',
