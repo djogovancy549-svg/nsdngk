@@ -6,9 +6,12 @@ import {
   ChevronUp,
   Clock,
   Copy,
+  Eye,
+  EyeOff,
   ExternalLink,
   FileSpreadsheet,
   FolderOpen,
+  KeyRound,
   Link2,
   Mail,
   Plus,
@@ -27,6 +30,7 @@ import {
 } from '../config/opdSheets';
 import {
   addSuperAdminAllowedEmail,
+  changeSuperAdminPassword,
   fetchSuperAdminAllowedEmails,
   getActiveAuthSheetConfig,
   loadCachedSuperAdminAllowedEmails,
@@ -103,6 +107,19 @@ export function AkunOpdView({
     text: string;
   } | null>(null);
 
+  // Super Admin Password change state
+  const [currentAdminPwd, setCurrentAdminPwd] = useState('');
+  const [newAdminPwd, setNewAdminPwd] = useState('');
+  const [confirmAdminPwd, setConfirmAdminPwd] = useState('');
+  const [showCurrentAdminPwd, setShowCurrentAdminPwd] = useState(false);
+  const [showNewAdminPwd, setShowNewAdminPwd] = useState(false);
+  const [showConfirmAdminPwd, setShowConfirmAdminPwd] = useState(false);
+  const [adminPwdBusy, setAdminPwdBusy] = useState(false);
+  const [adminPwdFeedback, setAdminPwdFeedback] = useState<{
+    type: 'success' | 'error';
+    text: string;
+  } | null>(null);
+
   useEffect(() => {
     let active = true;
     fetchSuperAdminAllowedEmails(currentSuperAdminEmail).then((res) => {
@@ -156,6 +173,57 @@ export function AkunOpdView({
       });
     } finally {
       setAdminEmailBusy(false);
+    }
+  };
+
+  const handleChangeSuperAdminPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAdminPwdFeedback(null);
+
+    if (!currentAdminPwd || !newAdminPwd || !confirmAdminPwd) {
+      setAdminPwdFeedback({
+        type: 'error',
+        text: 'Semua kolom kata sandi wajib diisi.',
+      });
+      return;
+    }
+
+    if (newAdminPwd.trim().length < 6) {
+      setAdminPwdFeedback({
+        type: 'error',
+        text: 'Kata sandi baru minimal 6 karakter.',
+      });
+      return;
+    }
+
+    if (newAdminPwd !== confirmAdminPwd) {
+      setAdminPwdFeedback({
+        type: 'error',
+        text: 'Konfirmasi kata sandi baru tidak cocok.',
+      });
+      return;
+    }
+
+    setAdminPwdBusy(true);
+    try {
+      const res = await changeSuperAdminPassword(
+        currentSuperAdminEmail,
+        currentAdminPwd,
+        newAdminPwd
+      );
+      if (res.ok) {
+        setCurrentAdminPwd('');
+        setNewAdminPwd('');
+        setConfirmAdminPwd('');
+        setShowCurrentAdminPwd(false);
+        setShowNewAdminPwd(false);
+        setShowConfirmAdminPwd(false);
+        setAdminPwdFeedback({ type: 'success', text: res.message });
+      } else {
+        setAdminPwdFeedback({ type: 'error', text: res.message });
+      }
+    } finally {
+      setAdminPwdBusy(false);
     }
   };
   const [selectedOpdId, setSelectedOpdId] = useState(OPD_DIRECTORY[0].id);
@@ -477,7 +545,7 @@ export function AkunOpdView({
                   type="email"
                   value={newAdminEmail}
                   onChange={(e) => setNewAdminEmail(e.target.value)}
-                  placeholder="admin.walidata@nagekeokab.go.id"
+                  placeholder="Masukkan email Super Admin baru"
                   className="flex-1 h-9 px-3 text-sm bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
                   required
                 />
@@ -554,6 +622,166 @@ export function AkunOpdView({
               );
             })}
           </div>
+        </div>
+
+        {/* Sub-panel: Ubah Kata Sandi Super Admin */}
+        <div className="px-5 py-4 border-t border-slate-200 bg-slate-50/60">
+          <div className="flex items-center gap-2 mb-3">
+            <KeyRound className="w-4 h-4 text-teal-700 shrink-0" />
+            <div>
+              <h3 className="text-sm font-semibold text-slate-900">
+                Ubah Kata Sandi Super Admin
+              </h3>
+              <p className="text-xs text-slate-500">
+                Kata sandi baru langsung dienkripsi (scrypt) dan disimpan di
+                server untuk seluruh email Super Admin yang terdaftar.
+              </p>
+            </div>
+          </div>
+
+          <form
+            onSubmit={handleChangeSuperAdminPassword}
+            className="space-y-3"
+          >
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div>
+                <label
+                  htmlFor="superadmin-current-pwd"
+                  className="block text-xs font-medium text-slate-700 mb-1"
+                >
+                  Kata Sandi Saat Ini
+                </label>
+                <div className="relative">
+                  <input
+                    id="superadmin-current-pwd"
+                    type={showCurrentAdminPwd ? 'text' : 'password'}
+                    value={currentAdminPwd}
+                    onChange={(e) => setCurrentAdminPwd(e.target.value)}
+                    placeholder="Masukkan kata sandi lama"
+                    autoComplete="current-password"
+                    className="w-full h-9 pl-3 pr-9 text-sm bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
+                    required
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowCurrentAdminPwd((prev) => !prev)}
+                    aria-label={
+                      showCurrentAdminPwd
+                        ? 'Sembunyikan kata sandi saat ini'
+                        : 'Lihat kata sandi saat ini'
+                    }
+                    className="absolute inset-y-0 right-0 flex items-center px-2.5 text-slate-400 hover:text-slate-700"
+                  >
+                    {showCurrentAdminPwd ? (
+                      <EyeOff className="w-4 h-4" />
+                    ) : (
+                      <Eye className="w-4 h-4" />
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label
+                  htmlFor="superadmin-new-pwd"
+                  className="block text-xs font-medium text-slate-700 mb-1"
+                >
+                  Kata Sandi Baru
+                </label>
+                <div className="relative">
+                  <input
+                    id="superadmin-new-pwd"
+                    type={showNewAdminPwd ? 'text' : 'password'}
+                    value={newAdminPwd}
+                    onChange={(e) => setNewAdminPwd(e.target.value)}
+                    placeholder="Minimal 6 karakter"
+                    minLength={6}
+                    autoComplete="new-password"
+                    className="w-full h-9 pl-3 pr-9 text-sm bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
+                    required
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowNewAdminPwd((prev) => !prev)}
+                    aria-label={
+                      showNewAdminPwd
+                        ? 'Sembunyikan kata sandi baru'
+                        : 'Lihat kata sandi baru'
+                    }
+                    className="absolute inset-y-0 right-0 flex items-center px-2.5 text-slate-400 hover:text-slate-700"
+                  >
+                    {showNewAdminPwd ? (
+                      <EyeOff className="w-4 h-4" />
+                    ) : (
+                      <Eye className="w-4 h-4" />
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label
+                  htmlFor="superadmin-confirm-pwd"
+                  className="block text-xs font-medium text-slate-700 mb-1"
+                >
+                  Konfirmasi Kata Sandi Baru
+                </label>
+                <div className="relative">
+                  <input
+                    id="superadmin-confirm-pwd"
+                    type={showConfirmAdminPwd ? 'text' : 'password'}
+                    value={confirmAdminPwd}
+                    onChange={(e) => setConfirmAdminPwd(e.target.value)}
+                    placeholder="Ulangi kata sandi baru"
+                    minLength={6}
+                    autoComplete="new-password"
+                    className="w-full h-9 pl-3 pr-9 text-sm bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
+                    required
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowConfirmAdminPwd((prev) => !prev)}
+                    aria-label={
+                      showConfirmAdminPwd
+                        ? 'Sembunyikan konfirmasi kata sandi'
+                        : 'Lihat konfirmasi kata sandi'
+                    }
+                    className="absolute inset-y-0 right-0 flex items-center px-2.5 text-slate-400 hover:text-slate-700"
+                  >
+                    {showConfirmAdminPwd ? (
+                      <EyeOff className="w-4 h-4" />
+                    ) : (
+                      <Eye className="w-4 h-4" />
+                    )}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex-1 min-w-[200px]">
+                {adminPwdFeedback && (
+                  <div
+                    className={`px-3 py-2 text-xs rounded-md border ${
+                      adminPwdFeedback.type === 'success'
+                        ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                        : 'bg-red-50 border-red-200 text-red-700'
+                    }`}
+                  >
+                    {adminPwdFeedback.text}
+                  </div>
+                )}
+              </div>
+              <button
+                type="submit"
+                disabled={adminPwdBusy}
+                className="inline-flex items-center gap-1.5 h-9 px-4 text-xs font-semibold text-white bg-teal-700 rounded-md hover:bg-teal-800 disabled:opacity-60 whitespace-nowrap"
+              >
+                <KeyRound className="w-3.5 h-3.5" />
+                {adminPwdBusy ? 'Menyimpan...' : 'Simpan Kata Sandi Baru'}
+              </button>
+            </div>
+          </form>
         </div>
       </section>
 

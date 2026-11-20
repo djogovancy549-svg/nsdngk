@@ -34,6 +34,91 @@ const SERVER_SUPER_ADMIN_EMAIL = (
 const SERVER_SUPER_ADMIN_PASSWORD =
   process.env.SUPER_ADMIN_PASSWORD || 'nagekeo2026';
 
+const SUPER_ADMIN_AUTH_FILE_PATH = path.resolve(
+  __dirname,
+  'data',
+  'superadmin-auth.json'
+);
+
+interface SuperAdminAuthStore {
+  salt: string;
+  passwordHash: string;
+  updatedAt: string;
+  updatedBy: string;
+}
+
+function hashSuperAdminPassword(password: string, salt: string): string {
+  return crypto.scryptSync(password, salt, 64).toString('hex');
+}
+
+function loadSuperAdminAuthStore(): SuperAdminAuthStore | null {
+  try {
+    if (fs.existsSync(SUPER_ADMIN_AUTH_FILE_PATH)) {
+      const raw = fs.readFileSync(SUPER_ADMIN_AUTH_FILE_PATH, 'utf8');
+      const parsed = JSON.parse(raw) as Partial<SuperAdminAuthStore>;
+      if (parsed.salt && parsed.passwordHash) {
+        return {
+          salt: String(parsed.salt),
+          passwordHash: String(parsed.passwordHash),
+          updatedAt: String(parsed.updatedAt || ''),
+          updatedBy: String(parsed.updatedBy || ''),
+        };
+      }
+    }
+  } catch {
+    // Fallback ke password default env
+  }
+  return null;
+}
+
+function saveSuperAdminPasswordHash(
+  newPassword: string,
+  updatedBy: string
+): SuperAdminAuthStore {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const record: SuperAdminAuthStore = {
+    salt,
+    passwordHash: hashSuperAdminPassword(newPassword, salt),
+    updatedAt: new Date().toISOString(),
+    updatedBy,
+  };
+  try {
+    const dir = path.dirname(SUPER_ADMIN_AUTH_FILE_PATH);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.writeFileSync(
+      SUPER_ADMIN_AUTH_FILE_PATH,
+      JSON.stringify(record, null, 2),
+      'utf8'
+    );
+  } catch {
+    // Tetap aktif di memori jika filesystem read-only
+  }
+  return record;
+}
+
+let superAdminAuthStore: SuperAdminAuthStore | null = loadSuperAdminAuthStore();
+
+function verifySuperAdminPassword(candidate: string): boolean {
+  if (!candidate) return false;
+  if (superAdminAuthStore) {
+    const rawHash = hashSuperAdminPassword(candidate, superAdminAuthStore.salt);
+    const trimmedHash = hashSuperAdminPassword(
+      candidate.trim(),
+      superAdminAuthStore.salt
+    );
+    return (
+      timingSafeEqualStr(rawHash, superAdminAuthStore.passwordHash) ||
+      timingSafeEqualStr(trimmedHash, superAdminAuthStore.passwordHash)
+    );
+  }
+  return (
+    timingSafeEqualStr(candidate, SERVER_SUPER_ADMIN_PASSWORD) ||
+    timingSafeEqualStr(candidate.trim(), SERVER_SUPER_ADMIN_PASSWORD)
+  );
+}
+
 const ALLOWLIST_FILE_PATH = path.resolve(
   __dirname,
   'data',
@@ -706,10 +791,7 @@ async function startServer() {
       return res.status(200).json({ ok: false, isSuperAdminCandidate: false });
     }
 
-    if (
-      timingSafeEqualStr(password, SERVER_SUPER_ADMIN_PASSWORD) ||
-      timingSafeEqualStr(password.trim(), SERVER_SUPER_ADMIN_PASSWORD)
-    ) {
+    if (verifySuperAdminPassword(password)) {
       loginAttemptsByIp.delete(ip);
       setSignedSessionCookie(res, {
         email: identifier,
@@ -883,6 +965,50 @@ async function startServer() {
       primaryEmail: SERVER_SUPER_ADMIN_EMAIL,
       allowedEmails: superAdminAllowedEmails,
       message: `Akses Super Admin untuk email ${targetEmail} berhasil dicabut.`,
+    });
+  });
+
+  app.put('/api/auth/superadmin/password', (req, res) => {
+    const actorEmail = requireSuperAdminActor(req, res);
+    if (!actorEmail) return;
+
+    const currentPassword = String(req.body?.currentPassword ?? '');
+    const newPassword = String(req.body?.newPassword ?? '');
+
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({
+        ok: false,
+        message: 'Kata sandi saat ini dan kata sandi baru wajib diisi.',
+      });
+    }
+
+    if (!verifySuperAdminPassword(currentPassword)) {
+      return res.status(401).json({
+        ok: false,
+        message: 'Kata sandi saat ini tidak sesuai.',
+      });
+    }
+
+    if (newPassword.trim().length < 6) {
+      return res.status(400).json({
+        ok: false,
+        message: 'Kata sandi baru minimal 6 karakter.',
+      });
+    }
+
+    if (timingSafeEqualStr(currentPassword, newPassword)) {
+      return res.status(400).json({
+        ok: false,
+        message: 'Kata sandi baru tidak boleh sama dengan kata sandi saat ini.',
+      });
+    }
+
+    superAdminAuthStore = saveSuperAdminPasswordHash(newPassword, actorEmail);
+    return res.status(200).json({
+      ok: true,
+      updatedAt: superAdminAuthStore.updatedAt,
+      message:
+        'Kata sandi Super Admin berhasil diperbarui. Gunakan kata sandi baru untuk login berikutnya.',
     });
   });
 

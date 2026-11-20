@@ -242,6 +242,57 @@ export async function removeSuperAdminAllowedEmail(
   };
 }
 
+export async function changeSuperAdminPassword(
+  actorEmail: string,
+  currentPassword: string,
+  newPassword: string
+): Promise<{ ok: boolean; message: string; updatedAt?: string }> {
+  if (!currentPassword || !newPassword) {
+    return {
+      ok: false,
+      message: 'Kata sandi saat ini dan kata sandi baru wajib diisi.',
+    };
+  }
+  if (newPassword.trim().length < 6) {
+    return {
+      ok: false,
+      message: 'Kata sandi baru minimal 6 karakter.',
+    };
+  }
+
+  try {
+    const res = await fetch('/api/auth/superadmin/password', {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-superadmin-email': actorEmail.trim().toLowerCase(),
+      },
+      body: JSON.stringify({ currentPassword, newPassword }),
+    });
+    const contentType = res.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      const data = await res.json();
+      return {
+        ok: Boolean(res.ok && data?.ok),
+        message:
+          data?.message ||
+          (res.ok
+            ? 'Kata sandi Super Admin berhasil diperbarui.'
+            : 'Gagal mengubah kata sandi Super Admin.'),
+        updatedAt: data?.updatedAt,
+      };
+    }
+  } catch {
+    // Tangani di bawah
+  }
+
+  return {
+    ok: false,
+    message:
+      'Server autentikasi tidak merespons. Pastikan server aktif sebelum mengubah kata sandi Super Admin.',
+  };
+}
+
 export function getActiveAuthSheetConfig(): AuthSheetConfig {
   try {
     const raw = localStorage.getItem(AUTH_CONFIG_STORAGE_KEY);
