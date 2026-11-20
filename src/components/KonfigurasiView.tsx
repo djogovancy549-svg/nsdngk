@@ -32,16 +32,28 @@ import {
   SheetProxyStats,
   updateRegencyConfig,
 } from '../services/regencyConfigService';
+import {
+  BigQueryConfigStatus,
+  BigQueryQueryResult,
+  executeBigQueryReadOnlySql,
+  fetchBigQueryStatus,
+  pushOpdSheetToBigQuery,
+} from '../services/bigQueryService';
+import { DynamicSheetRow, OpdDynamicSheet } from '../types/satuData';
 
 interface KonfigurasiViewProps {
   currentSuperAdminEmail: string;
   regencyConfig: RegencyWhiteLabelConfig;
+  sheets: OpdDynamicSheet[];
+  rowsBySheet: Record<string, DynamicSheetRow[]>;
   onRegencyConfigUpdated: (next: RegencyWhiteLabelConfig) => void;
 }
 
 export function KonfigurasiView({
   currentSuperAdminEmail,
   regencyConfig,
+  sheets,
+  rowsBySheet,
   onRegencyConfigUpdated,
 }: KonfigurasiViewProps) {
   // White-Label Multi-Kabupaten state
@@ -68,6 +80,38 @@ export function KonfigurasiView({
   const [loadingProxy, setLoadingProxy] = useState(false);
   const [proxyMessage, setProxyMessage] = useState<string | null>(null);
 
+  // BigQuery Data Warehouse state
+  const [bqStatus, setBqStatus] = useState<BigQueryConfigStatus | null>(null);
+  const [bqLoading, setBqLoading] = useState(false);
+  const [bqSelectedSheetId, setBqSelectedSheetId] = useState<string>(
+    sheets[0]?.id ?? ''
+  );
+  const [bqSyncing, setBqSyncing] = useState(false);
+  const [bqFeedback, setBqFeedback] = useState<{
+    type: 'success' | 'error';
+    text: string;
+  } | null>(null);
+  const [bqSql, setBqSql] = useState('');
+  const [bqQuerying, setBqQuerying] = useState(false);
+  const [bqQueryResult, setBqQueryResult] =
+    useState<BigQueryQueryResult | null>(null);
+
+  const loadBqStatus = async () => {
+    setBqLoading(true);
+    try {
+      const status = await fetchBigQueryStatus(currentSuperAdminEmail);
+      setBqStatus(status);
+      if (status?.tables?.length && !bqSql.trim()) {
+        const first = status.tables[0].tableId;
+        setBqSql(
+          `SELECT * FROM \`${status.config.projectId}.${status.config.datasetId}.${first}\` LIMIT 20`
+        );
+      }
+    } finally {
+      setBqLoading(false);
+    }
+  };
+
   const loadProxyStats = async () => {
     setLoadingProxy(true);
     try {
@@ -80,8 +124,58 @@ export function KonfigurasiView({
 
   useEffect(() => {
     loadProxyStats();
+    loadBqStatus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentSuperAdminEmail]);
+
+  const handleSyncSheetToBigQuery = async () => {
+    const targetSheet =
+      sheets.find((s) => s.id === bqSelectedSheetId) ?? sheets[0];
+    if (!targetSheet) {
+      setBqFeedback({
+        type: 'error',
+        text: 'Belum ada Google Sheet OPD terdaftar untuk disinkronkan ke BigQuery.',
+      });
+      return;
+    }
+    setBqFeedback(null);
+    setBqSyncing(true);
+    try {
+      const rows = rowsBySheet[targetSheet.id] ?? [];
+      const res = await pushOpdSheetToBigQuery(
+        currentSuperAdminEmail,
+        targetSheet,
+        rows
+      );
+      setBqFeedback({
+        type: res.ok ? 'success' : 'error',
+        text: res.message,
+      });
+      if (res.ok) {
+        if (res.fullTableName) {
+          setBqSql(`SELECT * FROM ${res.fullTableName} LIMIT 25`);
+        }
+        await loadBqStatus();
+      }
+    } finally {
+      setBqSyncing(false);
+    }
+  };
+
+  const handleRunBqSql = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBqQuerying(true);
+    setBqQueryResult(null);
+    try {
+      const res = await executeBigQueryReadOnlySql(
+        currentSuperAdminEmail,
+        bqSql
+      );
+      setBqQueryResult(res);
+    } finally {
+      setBqQuerying(false);
+    }
+  };
 
   const handleSaveRegency = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -555,6 +649,210 @@ export function KonfigurasiView({
               otomatis menyisipkan kunci ini secara rahasia.
             </p>
           </div>
+        </div>
+      </section>
+
+      {/* SECTION C: GOOGLE BIGQUERY DATA WAREHOUSE (NAIK KELAS SKALA BESAR — OPSIONAL & NON-BREAKING) */}
+      <section className="bg-white border border-slate-200 rounded-lg overflow-hidden">
+        <div className="px-6 py-4 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div>
+            <div className="flex items-center gap-2 text-xs">
+              {bqStatus?.config?.configured && bqStatus.ok ? (
+                <span className="inline-flex items-center gap-1 font-medium text-emerald-700">
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  BigQuery Terhubung ({bqStatus.config.location})
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1 font-medium text-slate-600">
+                  <Wrench className="w-3.5 h-3.5" />
+                  Mode Siap Aktif (Opsional — Google Sheet OPD tetap berjalan normal)
+                </span>
+              )}
+              <span className="text-slate-300">·</span>
+              <span className="text-slate-500">
+                Data Warehouse Lintas Dinas (BigQuery)
+              </span>
+            </div>
+            <h2 className="text-base font-semibold text-slate-900 mt-0.5">
+              Integrasi Google BigQuery &amp; Analitik SQL Lintas OPD
+            </h2>
+          </div>
+
+          <button
+            type="button"
+            onClick={loadBqStatus}
+            disabled={bqLoading}
+            className="inline-flex items-center gap-1.5 h-8 px-3 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-md hover:bg-slate-50 whitespace-nowrap shrink-0"
+          >
+            <RefreshCw
+              className={`w-3.5 h-3.5 ${bqLoading ? 'animate-spin' : ''}`}
+            />
+            Cek Koneksi BigQuery
+          </button>
+        </div>
+
+        <div className="p-6 space-y-5">
+          {bqStatus?.message && (
+            <div
+              className={`p-3 text-xs rounded-md border ${
+                bqStatus.ok
+                  ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                  : 'bg-slate-50 border-slate-200 text-slate-700'
+              }`}
+            >
+              {bqStatus.message}
+            </div>
+          )}
+
+          {bqFeedback && (
+            <div
+              className={`p-3 text-xs rounded-md border ${
+                bqFeedback.type === 'success'
+                  ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                  : 'bg-red-50 border-red-200 text-red-700'
+              }`}
+            >
+              {bqFeedback.text}
+            </div>
+          )}
+
+          {/* Push Sheet OPD -> Tabel BigQuery */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-end">
+            <div className="lg:col-span-8">
+              <label
+                htmlFor="bq-sheet-select"
+                className="block text-xs font-medium text-slate-700 mb-1"
+              >
+                Pilih Google Sheet OPD untuk Disinkronkan ke BigQuery
+              </label>
+              <select
+                id="bq-sheet-select"
+                value={bqSelectedSheetId || sheets[0]?.id || ''}
+                onChange={(e) => setBqSelectedSheetId(e.target.value)}
+                className="w-full h-10 px-3 text-sm bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
+              >
+                {sheets.length === 0 ? (
+                  <option value="">Belum ada Sheet OPD terdaftar</option>
+                ) : (
+                  sheets.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.namaOpd} — {s.judulDataset} [{s.sheetName}] (
+                      {(rowsBySheet[s.id] ?? []).length} baris)
+                    </option>
+                  ))
+                )}
+              </select>
+            </div>
+            <div className="lg:col-span-4">
+              <button
+                type="button"
+                onClick={handleSyncSheetToBigQuery}
+                disabled={
+                  bqSyncing || sheets.length === 0 || !bqStatus?.config?.configured
+                }
+                className="w-full inline-flex items-center justify-center gap-1.5 h-10 px-4 text-xs font-semibold text-white bg-[#0B1B2B] rounded-md hover:bg-slate-800 disabled:opacity-50"
+              >
+                <Zap className="w-3.5 h-3.5 text-teal-400" />
+                {bqSyncing
+                  ? 'Menyinkronkan ke BigQuery...'
+                  : 'Push Sheet ke BigQuery'}
+              </button>
+            </div>
+          </div>
+
+          {/* Daftar Tabel BigQuery Aktif */}
+          {bqStatus?.tables && bqStatus.tables.length > 0 && (
+            <div className="border border-slate-200 rounded-md overflow-hidden">
+              <div className="px-3.5 py-2 bg-slate-50 border-b border-slate-200 text-xs font-semibold text-slate-700">
+                Tabel BigQuery Aktif ({bqStatus.tables.length})
+              </div>
+              <div className="divide-y divide-slate-100 text-xs">
+                {bqStatus.tables.map((t) => (
+                  <div
+                    key={t.tableId}
+                    className="px-3.5 py-2 flex items-center justify-between gap-3"
+                  >
+                    <span className="font-mono text-slate-800">{t.tableId}</span>
+                    <span className="font-mono tabular-nums text-slate-500">
+                      {t.numRows.toLocaleString('id-ID')} baris
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Konsol SQL Analitik Read-Only (SELECT only, max 100 MB) */}
+          <form onSubmit={handleRunBqSql} className="space-y-2.5 pt-2 border-t border-slate-200">
+            <label
+              htmlFor="bq-sql-input"
+              className="block text-xs font-medium text-slate-700"
+            >
+              Konsol SQL Analitik Lintas Dinas (Khusus SELECT Read-Only · Batas
+              Aman 100 MB/Query)
+            </label>
+            <textarea
+              id="bq-sql-input"
+              rows={3}
+              value={bqSql}
+              onChange={(e) => setBqSql(e.target.value)}
+              placeholder="SELECT _nama_opd, COUNT(*) AS total_baris FROM `PROJECT_ID.satu_data_sektoral.opd_dinkes_sheet1` GROUP BY _nama_opd"
+              className="w-full p-3 text-xs font-mono bg-slate-50 border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
+            />
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-[11px] text-slate-500">
+                Perintah DROP, DELETE, UPDATE, INSERT otomatis diblokir oleh
+                server.
+              </span>
+              <button
+                type="submit"
+                disabled={
+                  bqQuerying || !bqSql.trim() || !bqStatus?.config?.configured
+                }
+                className="inline-flex items-center gap-1.5 h-8 px-3.5 text-xs font-semibold text-white bg-teal-700 rounded-md hover:bg-teal-800 disabled:opacity-50"
+              >
+                {bqQuerying ? 'Menjalankan...' : 'Jalankan Query SQL'}
+              </button>
+            </div>
+          </form>
+
+          {bqQueryResult && (
+            <div className="space-y-2">
+              {!bqQueryResult.ok ? (
+                <div className="p-3 text-xs bg-red-50 border border-red-200 text-red-700 rounded-md">
+                  {bqQueryResult.message}
+                </div>
+              ) : (
+                <div className="border border-slate-200 rounded-md overflow-x-auto">
+                  <div className="px-3 py-2 bg-slate-50 border-b border-slate-200 text-[11px] text-slate-600 font-mono">
+                    {bqQueryResult.totalRows} baris · {bqQueryResult.latencyMs} ms
+                  </div>
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="border-b border-slate-200 bg-white text-left text-slate-500">
+                        {bqQueryResult.columns.map((col) => (
+                          <th key={col} className="py-2 px-3 font-mono font-medium">
+                            {col}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {bqQueryResult.rows.slice(0, 30).map((row, idx) => (
+                        <tr key={idx}>
+                          {bqQueryResult.columns.map((col) => (
+                            <td key={col} className="py-1.5 px-3 text-slate-700">
+                              {String(row[col] ?? '')}
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </section>
 

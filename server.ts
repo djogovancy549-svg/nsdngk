@@ -6,6 +6,11 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type } from '@google/genai';
 import { createSecurityMiddleware } from './server/securityMiddleware.ts';
+import {
+  runReadOnlyBigQuerySql,
+  syncOpdSheetToBigQuery,
+  testBigQueryConnection,
+} from './server/bigQueryService.ts';
 
 dotenv.config();
 
@@ -642,6 +647,7 @@ async function startServer() {
       '/api/security/inspect-payload',
       '/api/security/intrusion-alert',
       '/api/security/analyze-threats',
+      '/api/bigquery/query',
     ],
     honeypotPaths: HONEYPOT_DECOY_PATHS,
     onIncident: (inc) => {
@@ -1148,6 +1154,79 @@ async function startServer() {
       message:
         'Kunci Rahasia Webhook (API_SECRET) baru berhasil dibuat. Perbarui konstanta API_SECRET di Code.gs jika mengaktifkan kunci ketat.',
     });
+  });
+
+  // 1a-4. Google BigQuery Data Warehouse Connector (Opsional / Additive, Kedaulatan Data Jakarta asia-southeast2)
+  app.get('/api/bigquery/status', async (req, res) => {
+    if (!requireSuperAdminActor(req, res)) return;
+    try {
+      const result = await testBigQueryConnection();
+      return res.status(200).json(result);
+    } catch (err) {
+      return res.status(500).json({
+        ok: false,
+        datasetExists: false,
+        tables: [],
+        message: `Gagal memeriksa koneksi BigQuery: ${
+          err instanceof Error ? err.message : 'Unknown error'
+        }`,
+      });
+    }
+  });
+
+  app.post('/api/bigquery/sync-sheet', async (req, res) => {
+    if (!requireSuperAdminActor(req, res)) return;
+    const body = req.body || {};
+    const headers = Array.isArray(body.headers)
+      ? body.headers.map((h: unknown) => String(h).trim()).filter(Boolean)
+      : [];
+    const rows = Array.isArray(body.rows) ? body.rows : [];
+
+    if (!body.opdId || !body.sheetName || headers.length === 0) {
+      return res.status(400).json({
+        ok: false,
+        message:
+          'Data sheet tidak lengkap (opdId, sheetName, dan minimal 1 kolom header wajib ada).',
+      });
+    }
+
+    try {
+      const result = await syncOpdSheetToBigQuery({
+        opdId: String(body.opdId),
+        namaOpd: String(body.namaOpd || body.opdId),
+        judulDataset: String(body.judulDataset || body.sheetName),
+        sheetName: String(body.sheetName),
+        headers,
+        rows,
+      });
+      return res.status(200).json(result);
+    } catch (err) {
+      return res.status(500).json({
+        ok: false,
+        message: `Gagal sinkronisasi ke BigQuery: ${
+          err instanceof Error ? err.message : 'Unknown error'
+        }`,
+      });
+    }
+  });
+
+  app.post('/api/bigquery/query', async (req, res) => {
+    if (!requireSuperAdminActor(req, res)) return;
+    const sql = String(req.body?.sql || '');
+    try {
+      const result = await runReadOnlyBigQuerySql(sql);
+      return res.status(200).json(result);
+    } catch (err) {
+      return res.status(400).json({
+        ok: false,
+        columns: [],
+        rows: [],
+        totalRows: 0,
+        latencyMs: 0,
+        message:
+          err instanceof Error ? err.message : 'Gagal menjalankan query SQL.',
+      });
+    }
   });
 
   // 1b. Honeypot Decoy Trap Endpoints (Membingungkan & memperlambat pemindai/peretas otomatis)

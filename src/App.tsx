@@ -1333,6 +1333,8 @@ export default function App() {
             <KonfigurasiView
               currentSuperAdminEmail={session.email}
               regencyConfig={regencyConfig}
+              sheets={sheets}
+              rowsBySheet={rowsBySheet}
               onRegencyConfigUpdated={setRegencyConfig}
             />
           )}
