@@ -8,6 +8,7 @@ import {
   AccountStatus,
   AuthSheetConfig,
   OpdAccount,
+  OpdRegistrationRequestView,
   UserSession,
 } from '../types/satuData';
 import {
@@ -347,6 +348,88 @@ export function resetCustomAuthSheetConfig(): AuthSheetConfig {
   return AUTH_SHEET_CONFIG;
 }
 
+export async function fetchAuthSheetConfigFromServer(
+  actorEmail: string
+): Promise<{
+  ok: boolean;
+  configured: boolean;
+  config?: {
+    sheetUrl: string;
+    sheetId: string;
+    sheetName: string;
+    webhookUrl: string;
+    updatedAt: string;
+  };
+}> {
+  try {
+    const res = await fetch('/api/auth/sheet-config', {
+      method: 'GET',
+      headers: {
+        Accept: 'application/json',
+        'x-superadmin-email': actorEmail.trim().toLowerCase(),
+      },
+    });
+    const data = await res.json();
+    if (res.ok && data?.ok && data?.config) {
+      if (data.configured && data.config.webhookUrl) {
+        saveCustomAuthSheetConfig({
+          sheetUrl: data.config.sheetUrl || '',
+          sheetName: data.config.sheetName || 'Akun_OPD',
+          webhookUrl: data.config.webhookUrl,
+        });
+      }
+      return {
+        ok: true,
+        configured: Boolean(data.configured),
+        config: data.config,
+      };
+    }
+  } catch {
+    // Abaikan
+  }
+  return { ok: false, configured: false };
+}
+
+export async function saveAuthSheetConfigToServer(
+  actorEmail: string,
+  input: {
+    sheetUrl: string;
+    sheetName: string;
+    webhookUrl: string;
+  }
+): Promise<{
+  ok: boolean;
+  configured: boolean;
+  message: string;
+}> {
+  try {
+    const res = await fetch('/api/auth/sheet-config', {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-superadmin-email': actorEmail.trim().toLowerCase(),
+      },
+      body: JSON.stringify(input),
+    });
+    const data = await res.json();
+    return {
+      ok: Boolean(res.ok && data?.ok),
+      configured: Boolean(data?.configured),
+      message:
+        data?.message ||
+        (res.ok
+          ? 'Konfigurasi Google Sheet Akun & PIN tersimpan di server.'
+          : 'Gagal menyimpan konfigurasi Google Sheet Akun di server.'),
+    };
+  } catch {
+    return {
+      ok: false,
+      configured: false,
+      message: 'Gagal menghubungi server untuk menyimpan konfigurasi Google Sheet Akun.',
+    };
+  }
+}
+
 export async function testAuthSheetConnection(
   config: AuthSheetConfig
 ): Promise<{ ok: boolean; latencyMs: number; message: string }> {
@@ -547,9 +630,15 @@ export interface RegisterAccountResult {
   message: string;
 }
 
+export interface RegisterAccountOptions {
+  unlockToken?: string;
+  bypassRequestGate?: boolean;
+}
+
 export async function registerOpdAccount(
   input: RegisterAccountInput,
-  existingAccounts: OpdAccount[]
+  existingAccounts: OpdAccount[],
+  options?: RegisterAccountOptions
 ): Promise<RegisterAccountResult> {
   const cleanEmail = input.email.trim().toLowerCase();
   const cleanUsername = input.username.trim().toLowerCase();
@@ -596,6 +685,28 @@ export async function registerOpdAccount(
       syncedToSheet: false,
       message: 'Email atau username sudah terdaftar. Gunakan kredensial lain.',
     };
+  }
+
+  if (!options?.bypassRequestGate) {
+    if (!options?.unlockToken) {
+      return {
+        ok: false,
+        syncedToSheet: false,
+        message:
+          'Pendaftaran akun dinas wajib menggunakan PIN Sekali Pakai yang diterbitkan oleh Super Admin Walidata.',
+      };
+    }
+    const consumeRes = await consumeOpdRegistrationUnlockToken(
+      options.unlockToken,
+      cleanEmail
+    );
+    if (!consumeRes.ok) {
+      return {
+        ok: false,
+        syncedToSheet: false,
+        message: consumeRes.message,
+      };
+    }
   }
 
   const passwordHash = await hashPassword(input.password);
@@ -1031,5 +1142,279 @@ export function clearOpdDeletePin(opdKey: string): void {
     localStorage.removeItem(`${OPD_DELETE_PIN_PREFIX}${opdKey}`);
   } catch {
     // Abaikan
+  }
+}
+
+export interface SubmitOpdRegistrationRequestInput {
+  opdId: string;
+  namaOpd: string;
+  namaPemohon: string;
+  jabatan: string;
+  emailPemohon: string;
+  nomorKontak: string;
+  alasanPengajuan: string;
+}
+
+export async function submitOpdRegistrationRequest(
+  input: SubmitOpdRegistrationRequestInput
+): Promise<{
+  ok: boolean;
+  syncedToSheet: boolean;
+  request?: OpdRegistrationRequestView;
+  message: string;
+}> {
+  try {
+    const res = await fetch('/api/auth/opd-registration-requests', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    });
+    const data = await res.json();
+    return {
+      ok: Boolean(res.ok && data?.ok),
+      syncedToSheet: Boolean(data?.syncedToSheet),
+      request: data?.request,
+      message:
+        data?.message ||
+        (res.ok
+          ? 'Permohonan pendaftaran berhasil diajukan.'
+          : 'Gagal mengajukan permohonan pendaftaran.'),
+    };
+  } catch {
+    return {
+      ok: false,
+      syncedToSheet: false,
+      message: 'Tidak dapat menghubungi server untuk mengirim permohonan.',
+    };
+  }
+}
+
+export async function fetchOpdRegistrationRequests(actorEmail: string): Promise<{
+  ok: boolean;
+  sheetConfigured: boolean;
+  pendingCount: number;
+  requests: OpdRegistrationRequestView[];
+}> {
+  try {
+    const res = await fetch('/api/auth/opd-registration-requests', {
+      method: 'GET',
+      headers: {
+        Accept: 'application/json',
+        'x-superadmin-email': actorEmail.trim().toLowerCase(),
+      },
+    });
+    const data = await res.json();
+    if (res.ok && data?.ok && Array.isArray(data.requests)) {
+      return {
+        ok: true,
+        sheetConfigured: Boolean(data.sheetConfigured),
+        pendingCount: Number(data.pendingCount || 0),
+        requests: data.requests as OpdRegistrationRequestView[],
+      };
+    }
+  } catch {
+    // Abaikan
+  }
+  return { ok: false, sheetConfigured: false, pendingCount: 0, requests: [] };
+}
+
+export async function syncPinRequestsWithGoogleSheet(
+  actorEmail: string
+): Promise<{
+  ok: boolean;
+  sheetConfigured: boolean;
+  syncedCount: number;
+  pendingCount: number;
+  requests: OpdRegistrationRequestView[];
+  message: string;
+}> {
+  try {
+    const res = await fetch('/api/auth/opd-registration-requests/sync-sheet', {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'x-superadmin-email': actorEmail.trim().toLowerCase(),
+      },
+    });
+    const data = await res.json();
+    return {
+      ok: Boolean(res.ok && data?.ok),
+      sheetConfigured: Boolean(data?.sheetConfigured),
+      syncedCount: Number(data?.syncedCount || 0),
+      pendingCount: Number(data?.pendingCount || 0),
+      requests: Array.isArray(data?.requests)
+        ? (data.requests as OpdRegistrationRequestView[])
+        : [],
+      message:
+        data?.message ||
+        (res.ok
+          ? 'Sinkronisasi PIN Sekali Pakai ke Google Sheet selesai.'
+          : 'Gagal menyinkronkan PIN Sekali Pakai ke Google Sheet.'),
+    };
+  } catch {
+    return {
+      ok: false,
+      sheetConfigured: false,
+      syncedCount: 0,
+      pendingCount: 0,
+      requests: [],
+      message: 'Gagal menghubungi server untuk sinkronisasi Google Sheet.',
+    };
+  }
+}
+
+export async function issueOpdRegistrationPin(
+  actorEmail: string,
+  requestId: string,
+  catatanAdmin?: string
+): Promise<{
+  ok: boolean;
+  syncedToSheet: boolean;
+  oneTimePin?: string;
+  request?: OpdRegistrationRequestView;
+  message: string;
+}> {
+  try {
+    const res = await fetch(
+      `/api/auth/opd-registration-requests/${encodeURIComponent(requestId)}/issue-pin`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-superadmin-email': actorEmail.trim().toLowerCase(),
+        },
+        body: JSON.stringify({ catatanAdmin: catatanAdmin || '' }),
+      }
+    );
+    const data = await res.json();
+    return {
+      ok: Boolean(res.ok && data?.ok),
+      syncedToSheet: Boolean(data?.syncedToSheet),
+      oneTimePin: data?.oneTimePin,
+      request: data?.request,
+      message:
+        data?.message ||
+        (res.ok
+          ? 'PIN Sekali Pakai berhasil diterbitkan.'
+          : 'Gagal menerbitkan PIN Sekali Pakai.'),
+    };
+  } catch {
+    return {
+      ok: false,
+      syncedToSheet: false,
+      message: 'Gagal menghubungi server untuk menerbitkan PIN.',
+    };
+  }
+}
+
+export async function rejectOpdRegistrationRequest(
+  actorEmail: string,
+  requestId: string,
+  catatanAdmin?: string
+): Promise<{
+  ok: boolean;
+  syncedToSheet: boolean;
+  request?: OpdRegistrationRequestView;
+  message: string;
+}> {
+  try {
+    const res = await fetch(
+      `/api/auth/opd-registration-requests/${encodeURIComponent(requestId)}/reject`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-superadmin-email': actorEmail.trim().toLowerCase(),
+        },
+        body: JSON.stringify({ catatanAdmin: catatanAdmin || '' }),
+      }
+    );
+    const data = await res.json();
+    return {
+      ok: Boolean(res.ok && data?.ok),
+      syncedToSheet: Boolean(data?.syncedToSheet),
+      request: data?.request,
+      message:
+        data?.message ||
+        (res.ok ? 'Permohonan ditolak.' : 'Gagal menolak permohonan.'),
+    };
+  } catch {
+    return {
+      ok: false,
+      syncedToSheet: false,
+      message: 'Gagal menghubungi server.',
+    };
+  }
+}
+
+export async function verifyOpdRegistrationPin(
+  emailPemohon: string,
+  pin: string
+): Promise<{
+  ok: boolean;
+  unlockToken?: string;
+  request?: OpdRegistrationRequestView;
+  message: string;
+}> {
+  try {
+    const res = await fetch('/api/auth/opd-registration-requests/verify-pin', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        emailPemohon: emailPemohon.trim().toLowerCase(),
+        pin: pin.trim(),
+      }),
+    });
+    const data = await res.json();
+    return {
+      ok: Boolean(res.ok && data?.ok),
+      unlockToken: data?.unlockToken,
+      request: data?.request,
+      message:
+        data?.message ||
+        (res.ok
+          ? 'PIN Sekali Pakai valid.'
+          : 'Verifikasi PIN Sekali Pakai gagal.'),
+    };
+  } catch {
+    return {
+      ok: false,
+      message: 'Gagal menghubungi server verifikasi PIN.',
+    };
+  }
+}
+
+export async function consumeOpdRegistrationUnlockToken(
+  unlockToken: string,
+  email: string
+): Promise<{
+  ok: boolean;
+  request?: OpdRegistrationRequestView;
+  message: string;
+}> {
+  try {
+    const res = await fetch('/api/auth/opd-registration-requests/consume', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        unlockToken,
+        email: email.trim().toLowerCase(),
+      }),
+    });
+    const data = await res.json();
+    return {
+      ok: Boolean(res.ok && data?.ok),
+      request: data?.request,
+      message:
+        data?.message ||
+        (res.ok
+          ? 'PIN Sekali Pakai berhasil dikonsumsi.'
+          : 'Token otorisasi PIN tidak valid.'),
+    };
+  } catch {
+    return {
+      ok: false,
+      message: 'Gagal mengonfirmasi penggunaan PIN Sekali Pakai di server.',
+    };
   }
 }

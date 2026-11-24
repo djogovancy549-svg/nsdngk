@@ -31,16 +31,21 @@ import {
 import {
   addSuperAdminAllowedEmail,
   changeSuperAdminPassword,
+  fetchOpdRegistrationRequests,
   fetchSuperAdminAllowedEmails,
   getActiveAuthSheetConfig,
+  issueOpdRegistrationPin,
   loadCachedSuperAdminAllowedEmails,
+  rejectOpdRegistrationRequest,
   removeSuperAdminAllowedEmail,
+  syncPinRequestsWithGoogleSheet,
 } from '../services/authSheetService';
 import { extractGoogleSheetId } from '../services/dynamicSheetService';
 import {
   AccountStatus,
   OpdAccount,
   OpdDynamicSheet,
+  OpdRegistrationRequestView,
 } from '../types/satuData';
 
 interface AkunOpdViewProps {
@@ -78,6 +83,7 @@ interface AkunOpdViewProps {
     manualHeaders?: string[]
   ) => Promise<void>;
   onRevokeSheetAccess: (sheet: OpdDynamicSheet) => void;
+  onPendingRequestsCountChange?: (count: number) => void;
 }
 
 export function AkunOpdView({
@@ -92,6 +98,7 @@ export function AkunOpdView({
   onDeleteAccount,
   onActivateSheetWebhook,
   onRevokeSheetAccess,
+  onPendingRequestsCountChange,
 }: AkunOpdViewProps) {
   // Super Admin Email Allowlist state
   const [allowedAdminEmails, setAllowedAdminEmails] = useState<string[]>(() =>
@@ -120,6 +127,60 @@ export function AkunOpdView({
     text: string;
   } | null>(null);
 
+  // OPD Registration Requests & One-Time PIN state
+  const [regRequests, setRegRequests] = useState<OpdRegistrationRequestView[]>(
+    []
+  );
+  const [pinSheetConfigured, setPinSheetConfigured] = useState(false);
+  const [pinSheetSyncing, setPinSheetSyncing] = useState(false);
+  const [regRequestsLoading, setRegRequestsLoading] = useState(false);
+  const [regReqActionId, setRegReqActionId] = useState<string | null>(null);
+  const [rejectDraftId, setRejectDraftId] = useState<string | null>(null);
+  const [rejectReason, setRejectReason] = useState('');
+  const [regReqFeedback, setRegReqFeedback] = useState<{
+    type: 'success' | 'error';
+    text: string;
+  } | null>(null);
+  const [revealedPin, setRevealedPin] = useState<{
+    pin: string;
+    request: OpdRegistrationRequestView;
+  } | null>(null);
+  const [copiedPin, setCopiedPin] = useState(false);
+  const [copiedPinMsg, setCopiedPinMsg] = useState(false);
+
+  const loadRegistrationRequests = async () => {
+    setRegRequestsLoading(true);
+    try {
+      const res = await fetchOpdRegistrationRequests(currentSuperAdminEmail);
+      if (res.ok) {
+        setPinSheetConfigured(res.sheetConfigured);
+        setRegRequests(res.requests);
+        onPendingRequestsCountChange?.(res.pendingCount);
+      }
+    } finally {
+      setRegRequestsLoading(false);
+    }
+  };
+
+  const handleSyncPinSheet = async () => {
+    setRegReqFeedback(null);
+    setPinSheetSyncing(true);
+    try {
+      const res = await syncPinRequestsWithGoogleSheet(currentSuperAdminEmail);
+      setPinSheetConfigured(res.sheetConfigured);
+      if (res.requests.length > 0) {
+        setRegRequests(res.requests);
+        onPendingRequestsCountChange?.(res.pendingCount);
+      }
+      setRegReqFeedback({
+        type: res.ok ? 'success' : 'error',
+        text: res.message,
+      });
+    } finally {
+      setPinSheetSyncing(false);
+    }
+  };
+
   useEffect(() => {
     let active = true;
     fetchSuperAdminAllowedEmails(currentSuperAdminEmail).then((res) => {
@@ -131,10 +192,96 @@ export function AkunOpdView({
         setPrimaryAdminEmail(res.primaryEmail);
       }
     });
+    fetchOpdRegistrationRequests(currentSuperAdminEmail).then((res) => {
+      if (!active || !res.ok) return;
+      setPinSheetConfigured(res.sheetConfigured);
+      setRegRequests(res.requests);
+      onPendingRequestsCountChange?.(res.pendingCount);
+    });
     return () => {
       active = false;
     };
   }, [currentSuperAdminEmail]);
+
+  const handleIssueOneTimePin = async (reqItem: OpdRegistrationRequestView) => {
+    setRegReqFeedback(null);
+    setRegReqActionId(reqItem.id);
+    try {
+      const res = await issueOpdRegistrationPin(
+        currentSuperAdminEmail,
+        reqItem.id
+      );
+      if (res.ok && res.oneTimePin && res.request) {
+        const updatedList = regRequests.map((r) =>
+          r.id === reqItem.id ? res.request! : r
+        );
+        setRegRequests(updatedList);
+        onPendingRequestsCountChange?.(
+          updatedList.filter((r) => r.status === 'Menunggu Persetujuan').length
+        );
+        setRevealedPin({ pin: res.oneTimePin, request: res.request });
+        setCopiedPin(false);
+        setCopiedPinMsg(false);
+        setRegReqFeedback({ type: 'success', text: res.message });
+      } else {
+        setRegReqFeedback({ type: 'error', text: res.message });
+      }
+    } finally {
+      setRegReqActionId(null);
+    }
+  };
+
+  const handleRejectRequest = async (reqId: string) => {
+    setRegReqFeedback(null);
+    setRegReqActionId(reqId);
+    try {
+      const res = await rejectOpdRegistrationRequest(
+        currentSuperAdminEmail,
+        reqId,
+        rejectReason
+      );
+      if (res.ok && res.request) {
+        const updatedList = regRequests.map((r) =>
+          r.id === reqId ? res.request! : r
+        );
+        setRegRequests(updatedList);
+        onPendingRequestsCountChange?.(
+          updatedList.filter((r) => r.status === 'Menunggu Persetujuan').length
+        );
+        setRejectDraftId(null);
+        setRejectReason('');
+        setRegReqFeedback({ type: 'success', text: res.message });
+      } else {
+        setRegReqFeedback({ type: 'error', text: res.message });
+      }
+    } finally {
+      setRegReqActionId(null);
+    }
+  };
+
+  const handleCopyOneTimePin = async (pin: string) => {
+    try {
+      await navigator.clipboard.writeText(pin);
+      setCopiedPin(true);
+      setTimeout(() => setCopiedPin(false), 2000);
+    } catch {
+      // Abaikan
+    }
+  };
+
+  const handleCopyPinInstruction = async (
+    pin: string,
+    reqItem: OpdRegistrationRequestView
+  ) => {
+    const msg = `Yth. ${reqItem.namaPemohon} (${reqItem.namaOpd}),\n\nPermohonan pendaftaran akun Portal Satu Data telah disetujui oleh Super Admin Walidata.\n\nEmail Terdaftar: ${reqItem.emailPemohon}\nPIN Sekali Pakai: ${pin}\n\nBuka portal → tab "Daftar Akun Dinas" → "2. Punya PIN Sekali Pakai". PIN hanya berlaku untuk 1 kali pendaftaran selama 24 jam.`;
+    try {
+      await navigator.clipboard.writeText(msg);
+      setCopiedPinMsg(true);
+      setTimeout(() => setCopiedPinMsg(false), 2500);
+    } catch {
+      // Abaikan
+    }
+  };
 
   const handleAddSuperAdminEmail = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -785,6 +932,394 @@ export function AkunOpdView({
         </div>
       </section>
 
+      {/* SECTION 0B: ANTREAN PERMOHONAN AKUN DINAS & PENERBITAN PIN SEKALI PAKAI */}
+      <section className="bg-white border border-slate-200 rounded-lg overflow-hidden">
+        <div className="px-5 py-4 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-start gap-2.5">
+            <div className="w-8 h-8 rounded-md bg-teal-700 text-white flex items-center justify-center shrink-0 mt-0.5">
+              <KeyRound className="w-4 h-4" />
+            </div>
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-base font-semibold text-slate-900">
+                  Permohonan Pendaftaran Akun Dinas &amp; PIN Sekali Pakai
+                </h2>
+                {pinSheetConfigured ? (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium rounded bg-emerald-50 border border-emerald-200 text-emerald-800">
+                    <CheckCircle2 className="w-3 h-3" />
+                    Terhubung ke Sheet (Permohonan_PIN_OPD)
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium rounded bg-amber-50 border border-amber-200 text-amber-800">
+                    Belum Terhubung ke Sheet Akun
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Karena portal publik sudah dibuka, dinas baru wajib mengajukan
+                permohonan terlebih dahulu. Terbitkan PIN sekali pakai agar
+                dinas dapat membuka laman pendaftaran akun OPD.{' '}
+                {pinSheetConfigured ? (
+                  <span>
+                    Seluruh permohonan &amp; hash PIN otomatis tercatat pada tab{' '}
+                    <code className="font-mono text-slate-700">
+                      Permohonan_PIN_OPD
+                    </code>
+                    .
+                  </span>
+                ) : (
+                  <span>
+                    Simpan URL Webhook{' '}
+                    <code className="font-mono text-slate-700">
+                      Code_Akun_OPD.gs
+                    </code>{' '}
+                    di menu <strong>Skrip Code.gs &amp; Auth</strong> agar PIN
+                    juga terdata otomatis di Google Sheet.
+                  </span>
+                )}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <span className="font-mono tabular-nums text-xs px-2.5 py-1 rounded bg-amber-50 border border-amber-200 text-amber-800">
+              {
+                regRequests.filter((r) => r.status === 'Menunggu Persetujuan')
+                  .length
+              }{' '}
+              Menunggu
+            </span>
+            <button
+              type="button"
+              onClick={handleSyncPinSheet}
+              disabled={pinSheetSyncing}
+              className="inline-flex items-center gap-1.5 h-8 px-3 text-xs font-medium text-teal-800 bg-teal-50 border border-teal-200 rounded-md hover:bg-teal-100 disabled:opacity-60 whitespace-nowrap"
+            >
+              <FileSpreadsheet
+                className={`w-3.5 h-3.5 ${
+                  pinSheetSyncing ? 'animate-pulse' : ''
+                }`}
+              />
+              {pinSheetSyncing ? 'Menyinkronkan...' : 'Sinkron ke Google Sheet'}
+            </button>
+            <button
+              type="button"
+              onClick={loadRegistrationRequests}
+              disabled={regRequestsLoading}
+              className="inline-flex items-center gap-1.5 h-8 px-3 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-md hover:bg-slate-50 disabled:opacity-60 whitespace-nowrap"
+            >
+              <RefreshCw
+                className={`w-3.5 h-3.5 ${
+                  regRequestsLoading ? 'animate-spin' : ''
+                }`}
+              />
+              Muat Ulang
+            </button>
+          </div>
+        </div>
+
+        {revealedPin && (
+          <div className="p-5 bg-[#0B1B2B] text-white border-b border-slate-800 space-y-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-wider text-teal-300">
+                  PIN Sekali Pakai Baru Diterbitkan (Hanya Tampil 1x)
+                </p>
+                <p className="text-sm font-semibold mt-0.5">
+                  {revealedPin.request.namaOpd} —{' '}
+                  {revealedPin.request.namaPemohon} (
+                  <span className="font-mono text-xs text-slate-300">
+                    {revealedPin.request.emailPemohon}
+                  </span>
+                  )
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setRevealedPin(null)}
+                className="self-start sm:self-center text-xs text-slate-300 hover:text-white underline"
+              >
+                Tutup Panel PIN
+              </button>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="px-4 py-2 bg-slate-900/90 border border-teal-500/40 rounded-md font-mono text-lg font-bold tracking-[0.22em] text-teal-300 select-all">
+                {revealedPin.pin}
+              </div>
+
+              <button
+                type="button"
+                onClick={() => handleCopyOneTimePin(revealedPin.pin)}
+                className="inline-flex items-center gap-1.5 h-9 px-3.5 text-xs font-semibold text-slate-950 bg-teal-400 rounded-md hover:bg-teal-300"
+              >
+                {copiedPin ? (
+                  <>
+                    <Check className="w-3.5 h-3.5" />
+                    PIN Tersalin
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-3.5 h-3.5" />
+                    Salin PIN
+                  </>
+                )}
+              </button>
+
+              <button
+                type="button"
+                onClick={() =>
+                  handleCopyPinInstruction(revealedPin.pin, revealedPin.request)
+                }
+                className="inline-flex items-center gap-1.5 h-9 px-3.5 text-xs font-medium text-white bg-white/10 border border-white/20 rounded-md hover:bg-white/15"
+              >
+                {copiedPinMsg ? (
+                  <>
+                    <Check className="w-3.5 h-3.5 text-teal-300" />
+                    Pesan Siap Kirim Tersalin
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-3.5 h-3.5" />
+                    Salin Pesan WhatsApp / Email
+                  </>
+                )}
+              </button>
+            </div>
+
+            <p className="text-[11px] text-slate-300 leading-relaxed">
+              Kirimkan PIN ini ke PIC dinas (WA/Telp:{' '}
+              <span className="font-mono text-white">
+                {revealedPin.request.nomorKontak}
+              </span>
+              ). Server hanya menyimpan hash scrypt — setelah panel ini ditutup
+              atau PIN digunakan, PIN tidak bisa dilihat ulang dan langsung
+              hangus setelah dipakai 1 kali.{' '}
+              {revealedPin.request.syncedToSheet ? (
+                <span className="text-emerald-300 font-medium">
+                  Metadata &amp; hash PIN sudah tercatat di tab Permohonan_PIN_OPD
+                  Google Sheet.
+                </span>
+              ) : (
+                <span className="text-amber-300">
+                  Belum tercatat di Google Sheet (lengkapi URL Webhook di menu
+                  Skrip Code.gs &amp; Auth lalu klik Sinkron ke Google Sheet).
+                </span>
+              )}
+            </p>
+          </div>
+        )}
+
+        {regReqFeedback && (
+          <div
+            className={`mx-5 mt-4 p-3 text-xs rounded-md border ${
+              regReqFeedback.type === 'success'
+                ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                : 'bg-red-50 border-red-200 text-red-700'
+            }`}
+          >
+            {regReqFeedback.text}
+          </div>
+        )}
+
+        {regRequests.length === 0 ? (
+          <div className="py-10 px-6 text-center">
+            <p className="text-sm font-medium text-slate-900">
+              Belum ada permohonan akun dinas yang masuk
+            </p>
+            <p className="mt-1 text-xs text-slate-500">
+              Saat dinas mengajukan permohonan pendaftaran di gerbang depan,
+              antrean persetujuan akan muncul di sini untuk Anda terbitkan PIN
+              sekali pakainya.
+            </p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto mt-2">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-y border-slate-200 bg-slate-50 text-left text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                  <th className="py-2.5 pl-5 pr-3">Dinas / Pemohon</th>
+                  <th className="py-2.5 px-3">Email &amp; Kontak PIC</th>
+                  <th className="py-2.5 px-3">Status PIN</th>
+                  <th className="py-2.5 pl-3 pr-5 text-right">Aksi</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {regRequests.map((reqItem) => {
+                  const busy = regReqActionId === reqItem.id;
+                  const isRejecting = rejectDraftId === reqItem.id;
+                  return (
+                    <React.Fragment key={reqItem.id}>
+                      <tr className="hover:bg-slate-50/70">
+                        <td className="py-3 pl-5 pr-3 align-top min-w-[220px]">
+                          <div className="font-semibold text-slate-900">
+                            {reqItem.namaOpd}
+                          </div>
+                          <div className="text-slate-600 mt-0.5">
+                            {reqItem.namaPemohon} · {reqItem.jabatan}
+                          </div>
+                          {reqItem.alasanPengajuan && (
+                            <div className="text-[11px] text-slate-500 mt-0.5">
+                              {reqItem.alasanPengajuan}
+                            </div>
+                          )}
+                        </td>
+                        <td className="py-3 px-3 align-top min-w-[190px]">
+                          <div className="font-mono text-slate-800">
+                            {reqItem.emailPemohon}
+                          </div>
+                          <div className="text-slate-500 mt-0.5 font-mono">
+                            WA/Telp: {reqItem.nomorKontak}
+                          </div>
+                          <div className="text-[11px] text-slate-400 mt-0.5">
+                            Diajukan:{' '}
+                            {new Date(reqItem.dibuatPada).toLocaleString('id-ID')}
+                          </div>
+                        </td>
+                        <td className="py-3 px-3 align-top whitespace-nowrap">
+                          {reqItem.status === 'Menunggu Persetujuan' ? (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-50 border border-amber-200 text-amber-800 font-medium">
+                              <Clock className="w-3 h-3" />
+                              Menunggu Persetujuan
+                            </span>
+                          ) : reqItem.status === 'PIN Diterbitkan' ? (
+                            <div className="space-y-0.5">
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-teal-50 border border-teal-200 text-teal-800 font-medium">
+                                <KeyRound className="w-3 h-3" />
+                                PIN Aktif ({reqItem.pinHint || '••••'})
+                              </span>
+                              {reqItem.pinExpiresAt && (
+                                <div className="text-[11px] text-slate-500">
+                                  Berlaku s/d{' '}
+                                  {new Date(
+                                    reqItem.pinExpiresAt
+                                  ).toLocaleString('id-ID')}
+                                </div>
+                              )}
+                            </div>
+                          ) : reqItem.status === 'Sudah Digunakan' ? (
+                            <div className="space-y-0.5">
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-50 border border-emerald-200 text-emerald-800 font-medium">
+                                <CheckCircle2 className="w-3 h-3" />
+                                Sudah Digunakan (Hangus)
+                              </span>
+                              {reqItem.digunakanPada && (
+                                <div className="text-[11px] text-slate-500">
+                                  Dipakai:{' '}
+                                  {new Date(
+                                    reqItem.digunakanPada
+                                  ).toLocaleString('id-ID')}
+                                </div>
+                              )}
+                            </div>
+                          ) : (
+                            <div className="space-y-0.5">
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-red-50 border border-red-200 text-red-700 font-medium">
+                                <X className="w-3 h-3" />
+                                Ditolak
+                              </span>
+                              {reqItem.catatanAdmin && (
+                                <div className="text-[11px] text-slate-500 max-w-[200px] whitespace-normal">
+                                  {reqItem.catatanAdmin}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                          <div className="mt-1">
+                            {reqItem.syncedToSheet ? (
+                              <span className="inline-flex items-center gap-1 text-[10px] font-medium text-emerald-700">
+                                <FileSpreadsheet className="w-3 h-3" />
+                                Tercatat di Google Sheet
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 text-[10px] text-slate-400">
+                                <FileSpreadsheet className="w-3 h-3" />
+                                Belum disinkronkan ke Sheet
+                              </span>
+                            )}
+                          </div>
+                        </td>
+                        <td className="py-3 pl-3 pr-5 text-right align-top whitespace-nowrap">
+                          {(reqItem.status === 'Menunggu Persetujuan' ||
+                            reqItem.status === 'PIN Diterbitkan') && (
+                            <div className="inline-flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() => handleIssueOneTimePin(reqItem)}
+                                className="inline-flex items-center gap-1 h-8 px-3 text-xs font-semibold text-white bg-teal-700 rounded-md hover:bg-teal-800 disabled:opacity-60"
+                              >
+                                <KeyRound className="w-3.5 h-3.5" />
+                                {busy
+                                  ? 'Memproses...'
+                                  : reqItem.status === 'PIN Diterbitkan'
+                                  ? 'Terbitkan PIN Baru'
+                                  : 'Setujui & Terbitkan PIN'}
+                              </button>
+                              <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() => {
+                                  setRejectDraftId(
+                                    isRejecting ? null : reqItem.id
+                                  );
+                                  setRejectReason('');
+                                }}
+                                className="h-8 px-2.5 text-xs font-medium text-red-700 bg-white border border-red-200 rounded-md hover:bg-red-50 disabled:opacity-60"
+                              >
+                                Tolak
+                              </button>
+                            </div>
+                          )}
+                          {(reqItem.status === 'Sudah Digunakan' ||
+                            reqItem.status === 'Ditolak') && (
+                            <span className="text-[11px] text-slate-400">
+                              Selesai
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                      {isRejecting && (
+                        <tr className="bg-red-50/50">
+                          <td colSpan={4} className="px-5 py-3">
+                            <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+                              <input
+                                type="text"
+                                value={rejectReason}
+                                onChange={(e) => setRejectReason(e.target.value)}
+                                placeholder="Alasan penolakan (mis. bukan email resmi dinas)"
+                                className="flex-1 h-8 px-3 text-xs bg-white border border-red-200 rounded-md focus:outline-none focus:border-red-500"
+                              />
+                              <div className="flex items-center gap-2 shrink-0">
+                                <button
+                                  type="button"
+                                  disabled={busy}
+                                  onClick={() => handleRejectRequest(reqItem.id)}
+                                  className="h-8 px-3 text-xs font-semibold text-white bg-red-600 rounded-md hover:bg-red-700 disabled:opacity-60"
+                                >
+                                  Konfirmasi Tolak
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setRejectDraftId(null)}
+                                  className="h-8 px-2.5 text-xs font-medium text-slate-600 bg-white border border-slate-300 rounded-md"
+                                >
+                                  Batal
+                                </button>
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
       {/* SECTION 1: PENCANGKOKAN CODE.GS PADA GOOGLE SHEET OPD */}
       <section className="bg-white border border-slate-200 rounded-lg overflow-hidden">
         <div className="px-5 py-4 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -1151,16 +1686,22 @@ export function AkunOpdView({
                                     Drive
                                   </a>
                                 )}
-                                <a
-                                  href={sheet.sheetUrl}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  title="Buka Google Sheet OPD"
-                                  className="inline-flex items-center gap-1 h-7 px-2 text-[11px] font-medium text-slate-700 bg-white border border-slate-300 rounded hover:bg-slate-50"
-                                >
-                                  <ExternalLink className="w-3 h-3" />
-                                  Sheet
-                                </a>
+                                {sheet.sheetUrl ? (
+                                  <a
+                                    href={sheet.sheetUrl}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    title="Buka Google Sheet OPD"
+                                    className="inline-flex items-center gap-1 h-7 px-2 text-[11px] font-medium text-slate-700 bg-white border border-slate-300 rounded hover:bg-slate-50"
+                                  >
+                                    <ExternalLink className="w-3 h-3" />
+                                    Sheet
+                                  </a>
+                                ) : (
+                                  <span className="inline-flex items-center h-7 px-2 text-[11px] font-medium text-teal-800 bg-teal-50 border border-teal-200 rounded">
+                                    Mandiri Server
+                                  </span>
+                                )}
                               </div>
                             </td>
                             <td className="py-3 pl-3 pr-5 text-right align-middle whitespace-nowrap">

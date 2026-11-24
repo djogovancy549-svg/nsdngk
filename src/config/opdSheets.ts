@@ -300,15 +300,19 @@ function doPost(e) {
 }`;
 
 /**
- * TEMPLATE GOOGLE APPS SCRIPT (Code_Akun_OPD.gs) UNTUK GOOGLE SHEET AKUN DINAS
+ * TEMPLATE GOOGLE APPS SCRIPT (Code_Akun_OPD.gs) UNTUK GOOGLE SHEET AKUN & PIN DINAS
  */
 export const APPS_SCRIPT_AUTH_TEMPLATE = `/**
- * Webhook Akun Dinas/OPD Satu Data Kabupaten Nagekeo (Code_Akun_OPD.gs)
- * Header baris 1 otomatis:
- * id | opdId | namaOpd | namaLengkap | email | username | passwordHash | driveFolderUrl | role | status | dibuatPada
+ * Webhook Akun Dinas/OPD & PIN Sekali Pakai Satu Data (Code_Akun_OPD.gs)
+ * Otomatis membuat 2 tab pada Spreadsheet Super Admin:
+ * 1) Akun_OPD: id | opdId | namaOpd | namaLengkap | email | username | passwordHash | driveFolderUrl | role | status | dibuatPada
+ * 2) Permohonan_PIN_OPD: id | opdId | namaOpd | namaPemohon | jabatan | emailPemohon | nomorKontak | alasanPengajuan | status | pinHint | pinHash | pinSalt | pinFailedAttempts | pinIssuedAt | pinExpiresAt | approvedBy | catatanAdmin | dibuatPada | digunakanPada
  */
 
+const API_SECRET = '';
 const AUTH_SHEET_NAME = 'Akun_OPD';
+const PIN_SHEET_NAME = 'Permohonan_PIN_OPD';
+
 const AUTH_HEADERS = [
   'id',
   'opdId',
@@ -323,12 +327,41 @@ const AUTH_HEADERS = [
   'dibuatPada'
 ];
 
-function getAuthSheet(sheetName) {
+const PIN_HEADERS = [
+  'id',
+  'opdId',
+  'namaOpd',
+  'namaPemohon',
+  'jabatan',
+  'emailPemohon',
+  'nomorKontak',
+  'alasanPengajuan',
+  'status',
+  'pinHint',
+  'pinHash',
+  'pinSalt',
+  'pinFailedAttempts',
+  'pinIssuedAt',
+  'pinExpiresAt',
+  'approvedBy',
+  'catatanAdmin',
+  'dibuatPada',
+  'digunakanPada'
+];
+
+function isAuthSecretValid(provided) {
+  if (!API_SECRET) return true;
+  return String(provided || '') === String(API_SECRET);
+}
+
+function getManagedSheet(sheetName, defaultHeaders) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  let sheet = ss.getSheetByName(sheetName || AUTH_SHEET_NAME);
+  let sheet = ss.getSheetByName(sheetName);
   if (!sheet) {
-    sheet = ss.insertSheet(sheetName || AUTH_SHEET_NAME);
-    sheet.appendRow(AUTH_HEADERS);
+    sheet = ss.insertSheet(sheetName);
+    sheet.appendRow(defaultHeaders);
+  } else if (sheet.getLastRow() === 0) {
+    sheet.appendRow(defaultHeaders);
   }
   return sheet;
 }
@@ -339,24 +372,58 @@ function authJson(payload) {
     .setMimeType(ContentService.MimeType.JSON);
 }
 
+function readSheetObjects(sheet) {
+  const values = sheet.getDataRange().getDisplayValues();
+  if (values.length <= 1) return [];
+  const headers = values[0];
+  return values.slice(1)
+    .filter(function(row) { return row.some(function(c) { return c !== ''; }); })
+    .map(function(row) {
+      const obj = {};
+      headers.forEach(function(h, idx) {
+        obj[String(h).trim()] = row[idx];
+      });
+      return obj;
+    });
+}
+
+function upsertPinRow(sheet, reqObj) {
+  const values = sheet.getDataRange().getValues();
+  const headers = values.length > 0 ? values[0] : PIN_HEADERS;
+  const idIdx = headers.indexOf('id');
+  const rowArr = headers.map(function(h) {
+    const key = String(h).trim();
+    const val = reqObj[key];
+    return val !== undefined && val !== null ? String(val) : '';
+  });
+
+  if (idIdx >= 0) {
+    for (let i = 1; i < values.length; i++) {
+      if (String(values[i][idIdx]) === String(reqObj.id)) {
+        sheet.getRange(i + 1, 1, 1, headers.length).setValues([rowArr]);
+        return 'updated';
+      }
+    }
+  }
+  sheet.appendRow(rowArr);
+  return 'inserted';
+}
+
 function doGet(e) {
   try {
-    const sheetName = (e && e.parameter && e.parameter.sheet) || AUTH_SHEET_NAME;
-    const sheet = getAuthSheet(sheetName);
-    const values = sheet.getDataRange().getValues();
-    if (values.length <= 1) return authJson({ ok: true, data: [] });
+    const providedSecret = (e && e.parameter && e.parameter.secret) || '';
+    if (!isAuthSecretValid(providedSecret)) {
+      return authJson({ ok: false, error: 'Akses ditolak: API_SECRET tidak valid.' });
+    }
+    const action = (e && e.parameter && e.parameter.action) || 'list';
+    if (action === 'listPinRequests' || (e && e.parameter && e.parameter.sheet === PIN_SHEET_NAME)) {
+      const pinSheet = getManagedSheet(PIN_SHEET_NAME, PIN_HEADERS);
+      return authJson({ ok: true, sheet: pinSheet.getName(), data: readSheetObjects(pinSheet) });
+    }
 
-    const headers = values[0];
-    const rows = values.slice(1)
-      .filter(function(row) { return row.some(function(c) { return c !== ''; }); })
-      .map(function(row) {
-        const obj = {};
-        headers.forEach(function(h, idx) {
-          obj[String(h).trim()] = row[idx];
-        });
-        return obj;
-      });
-    return authJson({ ok: true, data: rows });
+    const sheetName = (e && e.parameter && e.parameter.sheet) || AUTH_SHEET_NAME;
+    const sheet = getManagedSheet(sheetName, AUTH_HEADERS);
+    return authJson({ ok: true, sheet: sheet.getName(), data: readSheetObjects(sheet) });
   } catch (err) {
     return authJson({ ok: false, error: String(err) });
   }
@@ -365,8 +432,30 @@ function doGet(e) {
 function doPost(e) {
   try {
     const body = JSON.parse(e.postData.contents);
+    if (!isAuthSecretValid(body.secret)) {
+      return authJson({ ok: false, error: 'Akses ditolak: API_SECRET tidak valid.' });
+    }
     const action = body.action;
-    const sheet = getAuthSheet(body.sheetName);
+
+    if (action === 'upsertPinRequest' && body.request) {
+      const pinSheet = getManagedSheet(body.pinSheetName || PIN_SHEET_NAME, PIN_HEADERS);
+      const mode = upsertPinRow(pinSheet, body.request);
+      return authJson({ ok: true, action: 'upsertPinRequest', mode: mode, id: body.request.id });
+    }
+
+    if (action === 'syncPinRequests' && Array.isArray(body.requests)) {
+      const pinSheet = getManagedSheet(body.pinSheetName || PIN_SHEET_NAME, PIN_HEADERS);
+      let count = 0;
+      body.requests.forEach(function(item) {
+        if (item && item.id) {
+          upsertPinRow(pinSheet, item);
+          count++;
+        }
+      });
+      return authJson({ ok: true, action: 'syncPinRequests', count: count });
+    }
+
+    const sheet = getManagedSheet(body.sheetName || AUTH_SHEET_NAME, AUTH_HEADERS);
 
     if (action === 'register' && body.account) {
       const row = AUTH_HEADERS.map(function(k) {

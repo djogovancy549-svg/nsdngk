@@ -16,6 +16,7 @@ import {
   authenticateUser,
   deleteOpdAccount,
   fetchAccountsFromSheet,
+  fetchOpdRegistrationRequests,
   loadLocalAccounts,
   loadSavedSession,
   registerOpdAccount,
@@ -33,11 +34,14 @@ import {
   requestAiIntrusionWarning,
 } from './services/cyberSecurityService';
 import {
+  deleteSheetFromSovereignServer,
   extractGoogleSheetId,
   fetchDynamicSheetData,
+  fetchSovereignStoreState,
   loadAllDynamicRows,
   saveLocalDynamicRows,
   loadRegisteredSheets,
+  registerSheetToSovereignServer,
   saveRegisteredSheets,
   sendDynamicRowMutation,
 } from './services/dynamicSheetService';
@@ -70,6 +74,7 @@ import {
   PublishStatus,
   PublishedDatasetClone,
   SecurityEventEntry,
+  SheetStorageMode,
   UserSession,
 } from './types/satuData';
 
@@ -123,6 +128,34 @@ export default function App() {
     fetchAllDatasetMetadata().then((map) => {
       if (active) setMetadataBySheet(map);
     });
+    fetchSovereignStoreState().then((snapshot) => {
+      if (!active || !snapshot) return;
+      if (snapshot.sheets.length > 0) {
+        setSheets((prev) => {
+          const map = new Map<string, OpdDynamicSheet>();
+          prev.forEach((s) => map.set(s.id, s));
+          snapshot.sheets.forEach((srv) => {
+            const existing = map.get(srv.id);
+            map.set(srv.id, existing ? { ...existing, ...srv } : srv);
+          });
+          const merged = Array.from(map.values());
+          saveRegisteredSheets(merged);
+          return merged;
+        });
+      }
+      if (Object.keys(snapshot.rowsBySheet).length > 0) {
+        setRowsBySheet((prev) => {
+          const merged = { ...prev };
+          for (const [sid, srvRows] of Object.entries(snapshot.rowsBySheet)) {
+            if (Array.isArray(srvRows) && (srvRows.length > 0 || !merged[sid])) {
+              merged[sid] = srvRows;
+              saveLocalDynamicRows(sid, srvRows);
+            }
+          }
+          return merged;
+        });
+      }
+    });
     return () => {
       active = false;
     };
@@ -144,11 +177,27 @@ export default function App() {
     () => loadSecurityEvents()
   );
   const [notice, setNotice] = useState<string | null>(null);
+  const [pendingRegRequestCount, setPendingRegRequestCount] = useState(0);
   const [activeAiAlert, setActiveAiAlert] = useState<AiIntrusionWarning | null>(
     null
   );
   const seenServerAlertIdsRef = useRef<Set<string>>(new Set());
   const lastInspectLogRef = useRef<number>(0);
+
+  // Muat jumlah permohonan pendaftaran dinas yang menunggu PIN untuk Super Admin
+  useEffect(() => {
+    if (session?.role !== 'super_admin') {
+      setPendingRegRequestCount(0);
+      return;
+    }
+    let active = true;
+    fetchOpdRegistrationRequests(session.email).then((res) => {
+      if (active && res.ok) setPendingRegRequestCount(res.pendingCount);
+    });
+    return () => {
+      active = false;
+    };
+  }, [session?.role, session?.email]);
 
   // Pantau peringatan peretasan real-time dari server untuk Super Admin
   useEffect(() => {
@@ -333,8 +382,12 @@ export default function App() {
     username: string;
     password: string;
     driveFolderUrl: string;
+    unlockToken?: string;
   }) => {
-    const result = await registerOpdAccount(input, accounts);
+    const result = await registerOpdAccount(input, accounts, {
+      unlockToken: input.unlockToken,
+      bypassRequestGate: session?.role === 'super_admin',
+    });
     if (result.ok && result.account) {
       setAccounts((prev) => [result.account!, ...prev]);
       appendAuditLog(
@@ -640,14 +693,62 @@ export default function App() {
   const handleRegisterOpdSheet = async (input: {
     judulDataset: string;
     deskripsi: string;
+    storageMode: SheetStorageMode;
     sheetUrl: string;
     sheetName: string;
     manualHeaders: string[];
   }) => {
     if (!session || session.role !== 'opd') return;
 
-    const sheetId = extractGoogleSheetId(input.sheetUrl);
     const resolvedTabName = input.sheetName || 'Sheet1';
+
+    if (input.storageMode === 'server_standalone') {
+      const standaloneSheet: OpdDynamicSheet = {
+        id: `sheet-${Date.now().toString(36)}`,
+        accountId: session.id,
+        opdId: session.opdId ?? session.id,
+        namaOpd: session.namaOpd,
+        emailOpd: session.email,
+        driveFolderUrl: session.driveFolderUrl ?? '',
+        judulDataset: input.judulDataset,
+        deskripsi: input.deskripsi,
+        storageMode: 'server_standalone',
+        sheetUrl: '',
+        sheetId: '',
+        sheetName: resolvedTabName,
+        webhookUrl: '',
+        headers: input.manualHeaders,
+        status: 'Aktif',
+        didaftarkanPada: new Date().toISOString().slice(0, 10),
+        terakhirSinkron: new Date().toISOString(),
+      };
+
+      const srvRes = await registerSheetToSovereignServer(standaloneSheet, []);
+      setSheets((prev) => {
+        const next = [standaloneSheet, ...prev];
+        saveRegisteredSheets(next);
+        return next;
+      });
+      setRowsBySheet((prev) => ({
+        ...prev,
+        [standaloneSheet.id]: [],
+      }));
+
+      appendAuditLog(
+        'Daftar Sheet',
+        session.namaOpd,
+        `${standaloneSheet.judulDataset} (${resolvedTabName})`,
+        `Membuat Tabel Mandiri Server dengan ${standaloneSheet.headers.length} kolom (${standaloneSheet.headers.join(', ')}) tanpa ketergantungan Google Sheet.`,
+        srvRes.ok
+      );
+
+      setNotice(
+        `Tabel Mandiri Server "${standaloneSheet.judulDataset}" langsung AKTIF dengan ${standaloneSheet.headers.length} kolom header. Silakan buka Form & Tabel Dinamis untuk mulai mengisi data.`
+      );
+      return;
+    }
+
+    const sheetId = extractGoogleSheetId(input.sheetUrl);
     const existingActiveWorkbook = sheets.find(
       (s) =>
         s.sheetId === sheetId &&
@@ -665,6 +766,7 @@ export default function App() {
       driveFolderUrl: session.driveFolderUrl ?? '',
       judulDataset: input.judulDataset,
       deskripsi: input.deskripsi,
+      storageMode: 'google_sheet',
       sheetUrl: input.sheetUrl,
       sheetId,
       sheetName: resolvedTabName,
@@ -685,6 +787,8 @@ export default function App() {
     if (detected.availableTabs) {
       newSheet.availableTabs = detected.availableTabs;
     }
+
+    void registerSheetToSovereignServer(newSheet, detected.rows);
 
     setSheets((prev) => {
       const next = [newSheet, ...prev];
@@ -717,6 +821,7 @@ export default function App() {
   };
 
   const handleDeleteOpdSheet = (sheet: OpdDynamicSheet) => {
+    void deleteSheetFromSovereignServer(sheet.id);
     setSheets((prev) => {
       const next = prev
         .filter((s) => s.id !== sheet.id)
@@ -1180,6 +1285,7 @@ export default function App() {
         sheets={sheets}
         rowsBySheet={rowsBySheet}
         pendingGraftCount={pendingGraftCount}
+        pendingRegRequestsCount={pendingRegRequestCount}
         accountsCount={accounts.length}
         publishedCount={publishedActiveCount}
         securityAlertsCount={securityBlockedCount}
@@ -1367,6 +1473,7 @@ export default function App() {
               onDeleteAccount={handleDeleteAccount}
               onActivateSheetWebhook={handleActivateSheetWebhook}
               onRevokeSheetAccess={handleRevokeSheetAccess}
+              onPendingRequestsCountChange={setPendingRegRequestCount}
             />
           )}
 
@@ -1391,6 +1498,7 @@ export default function App() {
               sheets={sheets}
               rowsBySheet={rowsBySheet}
               metadataBySheet={metadataBySheet}
+              publishedClones={publishedClones}
               onRegencyConfigUpdated={setRegencyConfig}
             />
           )}

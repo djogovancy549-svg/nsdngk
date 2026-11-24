@@ -25,6 +25,7 @@ interface SidebarProps {
   sheets: OpdDynamicSheet[];
   rowsBySheet: Record<string, DynamicSheetRow[]>;
   pendingGraftCount: number;
+  pendingRegRequestsCount?: number;
   accountsCount: number;
   publishedCount: number;
   securityAlertsCount: number;
@@ -55,6 +56,7 @@ export function Sidebar({
   sheets,
   rowsBySheet,
   pendingGraftCount,
+  pendingRegRequestsCount = 0,
   accountsCount,
   publishedCount,
   securityAlertsCount,
@@ -106,8 +108,10 @@ export function Sidebar({
           {NAV_ITEMS.map((item) => {
             const Icon = item.icon;
             const isActive = activeSection === item.id;
+            const totalAkunPending =
+              pendingGraftCount + pendingRegRequestsCount;
             const showPending =
-              item.id === 'akun_sheet' && pendingGraftCount > 0;
+              item.id === 'akun_sheet' && totalAkunPending > 0;
             return (
               <button
                 key={item.id}
@@ -129,7 +133,7 @@ export function Sidebar({
                 </span>
                 {showPending ? (
                   <span className="font-mono tabular-nums text-xs font-semibold text-amber-300 shrink-0">
-                    {pendingGraftCount}
+                    {totalAkunPending}
                   </span>
                 ) : item.id === 'keamanan' && securityAlertsCount > 0 ? (
                   <span className="font-mono tabular-nums text-xs font-semibold text-red-400 shrink-0">

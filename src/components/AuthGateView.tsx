@@ -2,13 +2,22 @@ import React, { useState } from 'react';
 import {
   AlertTriangle,
   BookOpen,
+  CheckCircle2,
   Eye,
   EyeOff,
+  Globe,
+  KeyRound,
+  Lock,
   LogIn,
+  Send,
   ShieldCheck,
   UserPlus,
 } from 'lucide-react';
 import { OPD_DIRECTORY } from '../config/opdSheets';
+import {
+  submitOpdRegistrationRequest,
+  verifyOpdRegistrationPin,
+} from '../services/authSheetService';
 import {
   AiIntrusionWarning,
   appendSecurityEvent,
@@ -20,11 +29,13 @@ import {
   DynamicSheetRow,
   OpdAccount,
   OpdDynamicSheet,
+  OpdRegistrationRequestView,
 } from '../types/satuData';
 import { RegencyWhiteLabelConfig } from '../services/regencyConfigService';
 import { fetchTurnstilePublicConfig } from '../services/cloudflareWafService';
 import { HeroBannerSlider } from './HeroBannerSlider';
 import { PortalGuideView } from './PortalGuideView';
+import { PublicCatalogView } from './PublicCatalogView';
 import { RunningSummaryTicker } from './RunningSummaryTicker';
 
 function generateDynamicChallenge() {
@@ -57,6 +68,7 @@ interface AuthGateViewProps {
     username: string;
     password: string;
     driveFolderUrl: string;
+    unlockToken?: string;
   }) => Promise<{ ok: boolean; message: string }>;
 }
 
@@ -68,7 +80,9 @@ export function AuthGateView({
   onLogin,
   onRegister,
 }: AuthGateViewProps) {
-  const [mode, setMode] = useState<'login' | 'register' | 'guide'>('login');
+  const [mode, setMode] = useState<
+    'login' | 'register' | 'guide' | 'public_catalog'
+  >('login');
 
   // Login state
   const [loginRole, setLoginRole] = useState<'opd' | 'super_admin'>('opd');
@@ -150,7 +164,36 @@ export function AuthGateView({
     }
   }, [turnstileConfig.enabled, turnstileConfig.siteKey, mode, loginRole]);
 
-  // Register state
+  // 2-Stage Registration state (Ajukan Permohonan -> Verifikasi PIN Sekali Pakai -> Buka Laman Daftar)
+  const [regSubTab, setRegSubTab] = useState<'request' | 'pin'>('request');
+
+  // Stage 1: Request submission state
+  const [reqOpdId, setReqOpdId] = useState(OPD_DIRECTORY[0].id);
+  const [reqCustomOpdName, setReqCustomOpdName] = useState('');
+  const [reqNamaPemohon, setReqNamaPemohon] = useState('');
+  const [reqJabatan, setReqJabatan] = useState('');
+  const [reqEmail, setReqEmail] = useState('');
+  const [reqKontak, setReqKontak] = useState('');
+  const [reqAlasan, setReqAlasan] = useState('');
+  const [reqBusy, setReqBusy] = useState(false);
+  const [reqFeedback, setReqFeedback] = useState<{
+    type: 'success' | 'error';
+    text: string;
+  } | null>(null);
+
+  // Stage 2: One-time PIN verification state (unlockToken kept only in memory)
+  const [pinEmail, setPinEmail] = useState('');
+  const [pinInput, setPinInput] = useState('');
+  const [pinBusy, setPinBusy] = useState(false);
+  const [pinFeedback, setPinFeedback] = useState<{
+    type: 'success' | 'error';
+    text: string;
+  } | null>(null);
+  const [unlockToken, setUnlockToken] = useState<string | null>(null);
+  const [unlockedRequest, setUnlockedRequest] =
+    useState<OpdRegistrationRequestView | null>(null);
+
+  // Stage 3: Actual registration form (unlocked only after valid 1-time PIN)
   const [selectedOpdId, setSelectedOpdId] = useState(OPD_DIRECTORY[0].id);
   const [customOpdName, setCustomOpdName] = useState('');
   const [namaLengkap, setNamaLengkap] = useState('');
@@ -283,9 +326,95 @@ export function AuthGateView({
     }
   };
 
+  const handleRequestSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setReqFeedback(null);
+
+    const isCustom = reqOpdId === '__custom__';
+    const resolvedNamaOpd = isCustom
+      ? reqCustomOpdName.trim()
+      : OPD_DIRECTORY.find((o) => o.id === reqOpdId)?.nama ?? '';
+
+    if (!resolvedNamaOpd) {
+      setReqFeedback({ type: 'error', text: 'Nama Dinas/OPD wajib diisi.' });
+      return;
+    }
+
+    setReqBusy(true);
+    try {
+      const res = await submitOpdRegistrationRequest({
+        opdId: isCustom ? '' : reqOpdId,
+        namaOpd: resolvedNamaOpd,
+        namaPemohon: reqNamaPemohon,
+        jabatan: reqJabatan,
+        emailPemohon: reqEmail,
+        nomorKontak: reqKontak,
+        alasanPengajuan: reqAlasan,
+      });
+
+      if (res.ok) {
+        setReqFeedback({ type: 'success', text: res.message });
+        setPinEmail(reqEmail.trim().toLowerCase());
+        setReqCustomOpdName('');
+        setReqNamaPemohon('');
+        setReqJabatan('');
+        setReqEmail('');
+        setReqKontak('');
+        setReqAlasan('');
+      } else {
+        setReqFeedback({ type: 'error', text: res.message });
+      }
+    } finally {
+      setReqBusy(false);
+    }
+  };
+
+  const handleVerifyPinSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setPinFeedback(null);
+    setRegFeedback(null);
+    setPinBusy(true);
+    try {
+      const res = await verifyOpdRegistrationPin(pinEmail, pinInput);
+      if (res.ok && res.unlockToken && res.request) {
+        const reqData = res.request;
+        setUnlockToken(res.unlockToken);
+        setUnlockedRequest(reqData);
+        const matchedDir = OPD_DIRECTORY.find(
+          (o) =>
+            o.id === reqData.opdId ||
+            o.nama.toLowerCase() === reqData.namaOpd.toLowerCase()
+        );
+        if (matchedDir) {
+          setSelectedOpdId(matchedDir.id);
+          setCustomOpdName('');
+        } else {
+          setSelectedOpdId('__custom__');
+          setCustomOpdName(reqData.namaOpd);
+        }
+        setNamaLengkap(reqData.namaPemohon);
+        setEmail(reqData.emailPemohon);
+        setPinInput('');
+        setPinFeedback(null);
+      } else {
+        setPinFeedback({ type: 'error', text: res.message });
+      }
+    } finally {
+      setPinBusy(false);
+    }
+  };
+
   const handleRegisterSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setRegFeedback(null);
+
+    if (!unlockToken || !unlockedRequest) {
+      setRegFeedback({
+        type: 'error',
+        text: 'Masukkan dan verifikasi PIN Sekali Pakai dari Super Admin terlebih dahulu.',
+      });
+      return;
+    }
 
     const isCustom = selectedOpdId === '__custom__';
     const resolvedNamaOpd = isCustom
@@ -322,15 +451,17 @@ export function AuthGateView({
         opdId: isCustom ? '' : selectedOpdId,
         namaOpd: resolvedNamaOpd,
         namaLengkap,
-        email,
+        email: unlockedRequest.emailPemohon,
         username,
         password: regPassword,
         driveFolderUrl,
+        unlockToken,
       });
       if (res.ok) {
-        setRegFeedback({ type: 'success', text: res.message });
+        setUnlockToken(null);
+        setUnlockedRequest(null);
         setLoginRole('opd');
-        setIdentifier(email.trim().toLowerCase());
+        setIdentifier(unlockedRequest.emailPemohon);
         setPassword('');
         setNamaLengkap('');
         setEmail('');
@@ -339,6 +470,11 @@ export function AuthGateView({
         setRegPassword('');
         setRegConfirm('');
         setCustomOpdName('');
+        setRegSubTab('pin');
+        setPinFeedback({
+          type: 'success',
+          text: `${res.message} PIN Sekali Pakai telah digunakan dan dinonaktifkan. Silakan masuk melalui tab Masuk Portal.`,
+        });
       } else {
         setRegFeedback({ type: 'error', text: res.message });
       }
@@ -405,6 +541,20 @@ export function AuthGateView({
           <button
             type="button"
             role="tab"
+            aria-selected={mode === 'public_catalog'}
+            onClick={() => setMode('public_catalog')}
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded transition-colors whitespace-nowrap ${
+              mode === 'public_catalog'
+                ? 'bg-[#0B1B2B] text-white shadow-xs'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <Globe className="w-3.5 h-3.5" />
+            Katalog Publik
+          </button>
+          <button
+            type="button"
+            role="tab"
             aria-selected={mode === 'guide'}
             onClick={() => setMode('guide')}
             className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded transition-colors whitespace-nowrap ${
@@ -420,7 +570,15 @@ export function AuthGateView({
       </header>
 
       <main className="flex-1 w-full max-w-[1280px] mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8 space-y-6">
-        {mode === 'guide' ? (
+        {mode === 'public_catalog' ? (
+          <PublicCatalogView
+            regencyConfig={regencyConfig}
+            onGoToLogin={() => {
+              setMode('login');
+              setLoginError(null);
+            }}
+          />
+        ) : mode === 'guide' ? (
           <PortalGuideView
             regencyConfig={regencyConfig}
             onGoToLogin={() => {
@@ -461,11 +619,12 @@ export function AuthGateView({
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-4 border-t border-slate-200 text-xs">
               <div>
                 <p className="font-semibold text-slate-900">
-                  01. Daftar Akun &amp; Drive OPD
+                  01. Ajukan &amp; PIN Sekali Pakai
                 </p>
                 <p className="mt-1 text-slate-600 leading-relaxed">
-                  OPD mendaftarkan email, username, password, Folder Drive, lalu
-                  mengajukan URL Google Sheet mereka.
+                  Karena katalog warga sudah terbuka publik, dinas mengajukan
+                  permohonan terlebih dahulu lalu Super Admin memberikan PIN
+                  sekali pakai untuk membuka pendaftaran.
                 </p>
               </div>
               <div>
@@ -494,14 +653,24 @@ export function AuthGateView({
                 Dilindungi enkripsi SHA-256, proteksi brute-force &amp; audit AI
                 keamanan siber.
               </span>
-              <button
-                type="button"
-                onClick={() => setMode('guide')}
-                className="inline-flex items-center gap-1.5 text-xs font-medium text-teal-700 hover:text-teal-900 underline decoration-teal-300"
-              >
-                <BookOpen className="w-3.5 h-3.5" />
-                Baca Panduan Super Admin &amp; User OPD
-              </button>
+              <div className="flex flex-wrap items-center gap-4">
+                <button
+                  type="button"
+                  onClick={() => setMode('public_catalog')}
+                  className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-900 hover:text-teal-700 underline decoration-slate-300"
+                >
+                  <Globe className="w-3.5 h-3.5 text-teal-700" />
+                  Jelajahi Katalog Publik Warga
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMode('guide')}
+                  className="inline-flex items-center gap-1.5 text-xs font-medium text-teal-700 hover:text-teal-900 underline decoration-teal-300"
+                >
+                  <BookOpen className="w-3.5 h-3.5" />
+                  Baca Panduan
+                </button>
+              </div>
             </div>
           </div>
 
@@ -716,20 +885,39 @@ export function AuthGateView({
                     onClick={() => setMode('register')}
                     className="font-medium text-slate-900 underline decoration-slate-300"
                   >
-                    Daftar Akun &amp; Folder Drive OPD
+                    Ajukan / Verifikasi PIN Akun OPD
                   </button>
                 </p>
               </form>
-            ) : (
+            ) : unlockedRequest && unlockToken ? (
               <form onSubmit={handleRegisterSubmit} className="space-y-3">
-                <div className="pb-3 border-b border-slate-200">
-                  <h2 className="text-base font-semibold text-slate-900">
-                    Pendaftaran Akun &amp; Folder Drive OPD
-                  </h2>
-                  <p className="text-xs text-slate-500 mt-0.5">
-                    Setelah mendaftar, masuk untuk mengajukan URL Google Sheet
-                    OPD Anda.
-                  </p>
+                <div className="pb-3 border-b border-slate-200 space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-emerald-800 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded">
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      PIN Sekali Pakai Terverifikasi
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setUnlockToken(null);
+                        setUnlockedRequest(null);
+                        setRegFeedback(null);
+                      }}
+                      className="text-[11px] text-slate-500 hover:text-slate-900 underline"
+                    >
+                      Batal
+                    </button>
+                  </div>
+                  <div>
+                    <h2 className="text-base font-semibold text-slate-900">
+                      Laman Pendaftaran Akun Dinas (Terbuka)
+                    </h2>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      Lengkapi Folder Drive dan kredensial masuk. PIN akan
+                      hangus otomatis setelah formulir ini dikirim.
+                    </p>
+                  </div>
                 </div>
 
                 {regFeedback && (
@@ -744,49 +932,20 @@ export function AuthGateView({
                   </div>
                 )}
 
-                <div>
-                  <label
-                    htmlFor="gate-opd"
-                    className="block text-xs font-medium text-slate-700 mb-1"
-                  >
-                    Dinas / OPD
-                  </label>
-                  <select
-                    id="gate-opd"
-                    value={selectedOpdId}
-                    onChange={(e) => setSelectedOpdId(e.target.value)}
-                    className="w-full h-10 px-3 text-sm bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
-                  >
-                    {OPD_DIRECTORY.map((opd) => (
-                      <option key={opd.id} value={opd.id}>
-                        {opd.nama}
-                      </option>
-                    ))}
-                    <option value="__custom__">
-                      + Dinas / Badan / Bagian Lainnya...
-                    </option>
-                  </select>
-                </div>
-
-                {selectedOpdId === '__custom__' && (
-                  <div>
-                    <label
-                      htmlFor="gate-custom-opd"
-                      className="block text-xs font-medium text-slate-700 mb-1"
-                    >
-                      Nama Dinas / Badan / Bagian
-                    </label>
-                    <input
-                      id="gate-custom-opd"
-                      type="text"
-                      value={customOpdName}
-                      onChange={(e) => setCustomOpdName(e.target.value)}
-                      placeholder="Contoh: Dinas Koperasi, UKM & Perdagangan"
-                      className="w-full h-10 px-3 text-sm bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
-                      required
-                    />
+                <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-md space-y-1 text-xs">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-slate-500">Dinas / OPD:</span>
+                    <span className="font-semibold text-slate-900 text-right">
+                      {unlockedRequest.namaOpd}
+                    </span>
                   </div>
-                )}
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-slate-500">Email Terkunci:</span>
+                    <span className="font-mono text-slate-800">
+                      {unlockedRequest.emailPemohon}
+                    </span>
+                  </div>
+                </div>
 
                 <div>
                   <label
@@ -806,41 +965,22 @@ export function AuthGateView({
                   />
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label
-                      htmlFor="gate-nama"
-                      className="block text-xs font-medium text-slate-700 mb-1"
-                    >
-                      Nama PIC / Operator
-                    </label>
-                    <input
-                      id="gate-nama"
-                      type="text"
-                      value={namaLengkap}
-                      onChange={(e) => setNamaLengkap(e.target.value)}
-                      placeholder="Nama lengkap"
-                      className="w-full h-10 px-3 text-sm bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
-                      required
-                    />
-                  </div>
-                  <div>
-                    <label
-                      htmlFor="gate-email"
-                      className="block text-xs font-medium text-slate-700 mb-1"
-                    >
-                      Email Resmi OPD
-                    </label>
-                    <input
-                      id="gate-email"
-                      type="email"
-                      value={email}
-                      onChange={(e) => setEmail(e.target.value)}
-                      placeholder="Masukkan alamat email"
-                      className="w-full h-10 px-3 text-sm bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
-                      required
-                    />
-                  </div>
+                <div>
+                  <label
+                    htmlFor="gate-nama"
+                    className="block text-xs font-medium text-slate-700 mb-1"
+                  >
+                    Nama PIC / Operator
+                  </label>
+                  <input
+                    id="gate-nama"
+                    type="text"
+                    value={namaLengkap}
+                    onChange={(e) => setNamaLengkap(e.target.value)}
+                    placeholder="Nama lengkap"
+                    className="w-full h-10 px-3 text-sm bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
+                    required
+                  />
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
@@ -905,11 +1045,309 @@ export function AuthGateView({
                   className="w-full inline-flex items-center justify-center gap-2 h-10 px-4 text-xs font-semibold text-white bg-[#0B1B2B] rounded-md hover:bg-slate-800 disabled:opacity-60 transition-colors"
                 >
                   <UserPlus className="w-4 h-4" />
-                  {regBusy ? 'Mendaftarkan Akun...' : 'Daftar Akun Dinas'}
+                  {regBusy ? 'Mendaftarkan Akun...' : 'Selesaikan Pendaftaran Akun'}
                 </button>
+              </form>
+            ) : (
+              <div className="space-y-4">
+                <div className="pb-3 border-b border-slate-200 space-y-3">
+                  <div className="flex items-start gap-2.5">
+                    <div className="w-8 h-8 rounded-md bg-amber-50 border border-amber-200 text-amber-700 flex items-center justify-center shrink-0 mt-0.5">
+                      <Lock className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h2 className="text-base font-semibold text-slate-900">
+                        Gerbang Pendaftaran Akun Dinas
+                      </h2>
+                      <p className="text-xs text-slate-500 mt-0.5">
+                        Untuk mencegah akun palsu di portal publik, dinas wajib
+                        mengajukan permohonan dan memasukkan PIN Sekali Pakai
+                        dari Super Admin.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div
+                    className="grid grid-cols-2 gap-1 p-1 bg-slate-100 rounded-md"
+                    role="tablist"
+                    aria-label="Tahap pendaftaran dinas"
+                  >
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={regSubTab === 'request'}
+                      onClick={() => {
+                        setRegSubTab('request');
+                        setPinFeedback(null);
+                      }}
+                      className={`h-8 text-xs font-medium rounded transition-colors ${
+                        regSubTab === 'request'
+                          ? 'bg-white text-slate-900 shadow-xs'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      1. Ajukan Permohonan
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={regSubTab === 'pin'}
+                      onClick={() => {
+                        setRegSubTab('pin');
+                        setReqFeedback(null);
+                      }}
+                      className={`h-8 text-xs font-medium rounded transition-colors ${
+                        regSubTab === 'pin'
+                          ? 'bg-[#0B1B2B] text-white shadow-xs'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      2. Punya PIN Sekali Pakai
+                    </button>
+                  </div>
+                </div>
+
+                {regSubTab === 'request' ? (
+                  <form onSubmit={handleRequestSubmit} className="space-y-3">
+                    {reqFeedback && (
+                      <div
+                        className={`p-3 text-xs rounded-md border space-y-2 ${
+                          reqFeedback.type === 'success'
+                            ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                            : 'bg-red-50 border-red-200 text-red-700'
+                        }`}
+                      >
+                        <p>{reqFeedback.text}</p>
+                        {reqFeedback.type === 'success' && (
+                          <button
+                            type="button"
+                            onClick={() => setRegSubTab('pin')}
+                            className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-900 underline"
+                          >
+                            <KeyRound className="w-3.5 h-3.5" />
+                            Sudah terima PIN dari Super Admin? Buka di sini
+                          </button>
+                        )}
+                      </div>
+                    )}
+
+                    <div>
+                      <label
+                        htmlFor="req-opd"
+                        className="block text-xs font-medium text-slate-700 mb-1"
+                      >
+                        Dinas / OPD Pemohon
+                      </label>
+                      <select
+                        id="req-opd"
+                        value={reqOpdId}
+                        onChange={(e) => setReqOpdId(e.target.value)}
+                        className="w-full h-10 px-3 text-sm bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
+                      >
+                        {OPD_DIRECTORY.map((opd) => (
+                          <option key={opd.id} value={opd.id}>
+                            {opd.nama}
+                          </option>
+                        ))}
+                        <option value="__custom__">
+                          + Dinas / Badan / Bagian Lainnya...
+                        </option>
+                      </select>
+                    </div>
+
+                    {reqOpdId === '__custom__' && (
+                      <div>
+                        <label
+                          htmlFor="req-custom-opd"
+                          className="block text-xs font-medium text-slate-700 mb-1"
+                        >
+                          Nama Dinas / Badan / Bagian
+                        </label>
+                        <input
+                          id="req-custom-opd"
+                          type="text"
+                          value={reqCustomOpdName}
+                          onChange={(e) => setReqCustomOpdName(e.target.value)}
+                          placeholder="Contoh: Dinas Koperasi, UKM & Perdagangan"
+                          className="w-full h-10 px-3 text-sm bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
+                          required
+                        />
+                      </div>
+                    )}
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label
+                          htmlFor="req-nama"
+                          className="block text-xs font-medium text-slate-700 mb-1"
+                        >
+                          Nama PIC / Pemohon
+                        </label>
+                        <input
+                          id="req-nama"
+                          type="text"
+                          value={reqNamaPemohon}
+                          onChange={(e) => setReqNamaPemohon(e.target.value)}
+                          placeholder="Nama pejabat/operator"
+                          className="w-full h-10 px-3 text-sm bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
+                          required
+                        />
+                      </div>
+                      <div>
+                        <label
+                          htmlFor="req-jabatan"
+                          className="block text-xs font-medium text-slate-700 mb-1"
+                        >
+                          Jabatan
+                        </label>
+                        <input
+                          id="req-jabatan"
+                          type="text"
+                          value={reqJabatan}
+                          onChange={(e) => setReqJabatan(e.target.value)}
+                          placeholder="Contoh: Analis Data / Operator"
+                          className="w-full h-10 px-3 text-sm bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label
+                          htmlFor="req-email"
+                          className="block text-xs font-medium text-slate-700 mb-1"
+                        >
+                          Email Resmi Dinas
+                        </label>
+                        <input
+                          id="req-email"
+                          type="email"
+                          value={reqEmail}
+                          onChange={(e) => setReqEmail(e.target.value)}
+                          placeholder="Masukkan email dinas"
+                          className="w-full h-10 px-3 text-sm bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
+                          required
+                        />
+                      </div>
+                      <div>
+                        <label
+                          htmlFor="req-kontak"
+                          className="block text-xs font-medium text-slate-700 mb-1"
+                        >
+                          No. WhatsApp / Telepon PIC
+                        </label>
+                        <input
+                          id="req-kontak"
+                          type="tel"
+                          value={reqKontak}
+                          onChange={(e) => setReqKontak(e.target.value)}
+                          placeholder="08xxxxxxxxxx"
+                          className="w-full h-10 px-3 text-sm bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
+                          required
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label
+                        htmlFor="req-alasan"
+                        className="block text-xs font-medium text-slate-700 mb-1"
+                      >
+                        Keterangan / Jenis Dataset yang Akan Dikelola
+                      </label>
+                      <input
+                        id="req-alasan"
+                        type="text"
+                        value={reqAlasan}
+                        onChange={(e) => setReqAlasan(e.target.value)}
+                        placeholder="Contoh: Pengelolaan data sektoral tahun 2026"
+                        className="w-full h-10 px-3 text-sm bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
+                      />
+                    </div>
+
+                    <button
+                      type="submit"
+                      disabled={reqBusy}
+                      className="w-full inline-flex items-center justify-center gap-2 h-10 px-4 text-xs font-semibold text-white bg-[#0B1B2B] rounded-md hover:bg-slate-800 disabled:opacity-60 transition-colors"
+                    >
+                      <Send className="w-4 h-4" />
+                      {reqBusy
+                        ? 'Mengirim Permohonan...'
+                        : 'Ajukan Permohonan ke Super Admin'}
+                    </button>
+                  </form>
+                ) : (
+                  <form onSubmit={handleVerifyPinSubmit} className="space-y-3">
+                    {pinFeedback && (
+                      <div
+                        className={`p-3 text-xs rounded-md border ${
+                          pinFeedback.type === 'success'
+                            ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                            : 'bg-red-50 border-red-200 text-red-700'
+                        }`}
+                      >
+                        {pinFeedback.text}
+                      </div>
+                    )}
+
+                    <div className="p-3 bg-slate-50 border border-slate-200 rounded-md text-xs text-slate-600 leading-relaxed">
+                      Masukkan email yang Anda gunakan saat mengajukan
+                      permohonan beserta <strong>PIN Sekali Pakai</strong>{' '}
+                      (format <code className="font-mono">XXXX-XXXX</code>) yang
+                      diberikan oleh Super Admin Walidata.
+                    </div>
+
+                    <div>
+                      <label
+                        htmlFor="pin-email"
+                        className="block text-xs font-medium text-slate-700 mb-1"
+                      >
+                        Email Pemohon Terdaftar
+                      </label>
+                      <input
+                        id="pin-email"
+                        type="email"
+                        value={pinEmail}
+                        onChange={(e) => setPinEmail(e.target.value)}
+                        placeholder="Masukkan email sesuai permohonan"
+                        className="w-full h-10 px-3 text-sm bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
+                        required
+                      />
+                    </div>
+
+                    <div>
+                      <label
+                        htmlFor="pin-code"
+                        className="block text-xs font-medium text-slate-700 mb-1"
+                      >
+                        PIN Sekali Pakai dari Super Admin
+                      </label>
+                      <input
+                        id="pin-code"
+                        type="text"
+                        value={pinInput}
+                        onChange={(e) => setPinInput(e.target.value.toUpperCase())}
+                        placeholder="Contoh: A7K9-M2P4"
+                        className="w-full h-10 px-3 text-sm font-mono tracking-widest uppercase bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
+                        required
+                      />
+                    </div>
+
+                    <button
+                      type="submit"
+                      disabled={pinBusy}
+                      className="w-full inline-flex items-center justify-center gap-2 h-10 px-4 text-xs font-semibold text-white bg-teal-700 rounded-md hover:bg-teal-800 disabled:opacity-60 transition-colors"
+                    >
+                      <KeyRound className="w-4 h-4" />
+                      {pinBusy
+                        ? 'Memverifikasi PIN...'
+                        : 'Verifikasi PIN & Buka Laman Pendaftaran'}
+                    </button>
+                  </form>
+                )}
 
                 <p className="text-xs text-center text-slate-500 pt-1">
-                  Sudah punya akun?{' '}
+                  Sudah memiliki akun dinas aktif?{' '}
                   <button
                     type="button"
                     onClick={() => setMode('login')}
@@ -918,7 +1356,7 @@ export function AuthGateView({
                     Masuk di sini
                   </button>
                 </p>
-              </form>
+              </div>
             )}
           </div>
         </div>

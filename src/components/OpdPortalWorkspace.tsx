@@ -44,6 +44,7 @@ import {
   DynamicSheetRow,
   OpdAccount,
   OpdDynamicSheet,
+  SheetStorageMode,
   UserSession,
 } from '../types/satuData';
 import { AnalyticsBarDonutSection } from './AnalyticsBarDonutSection';
@@ -65,6 +66,7 @@ interface OpdPortalWorkspaceProps {
   onRegisterSheet: (input: {
     judulDataset: string;
     deskripsi: string;
+    storageMode: SheetStorageMode;
     sheetUrl: string;
     sheetName: string;
     manualHeaders: string[];
@@ -119,6 +121,8 @@ export function OpdPortalWorkspace({
   );
 
   // Sheet registration form state
+  const [storageMode, setStorageMode] =
+    useState<SheetStorageMode>('server_standalone');
   const [judulDataset, setJudulDataset] = useState('');
   const [deskripsi, setDeskripsi] = useState('');
   const [sheetUrl, setSheetUrl] = useState('');
@@ -202,30 +206,44 @@ export function OpdPortalWorkspace({
     e.preventDefault();
     setRegSheetError(null);
 
-    if (!judulDataset.trim() || !sheetUrl.trim()) {
-      setRegSheetError('Judul dataset dan URL Google Sheet wajib diisi.');
-      return;
-    }
-
-    const extractedId = extractGoogleSheetId(sheetUrl.trim());
-    if (!extractedId) {
-      setRegSheetError(
-        'Format URL Google Sheet tidak valid. Contoh: https://docs.google.com/spreadsheets/d/ID_SHEET/edit'
-      );
-      return;
-    }
-
     const manualHeaders = manualHeadersText
       .split(',')
       .map((h) => h.trim())
       .filter(Boolean);
+
+    if (!judulDataset.trim()) {
+      setRegSheetError('Judul dataset wajib diisi.');
+      return;
+    }
+
+    if (storageMode === 'server_standalone') {
+      if (manualHeaders.length === 0) {
+        setRegSheetError(
+          'Untuk Tabel Mandiri Server, masukkan minimal 1 nama kolom header (dipisah koma).'
+        );
+        return;
+      }
+    } else {
+      if (!sheetUrl.trim()) {
+        setRegSheetError('URL Google Sheet wajib diisi untuk mode Google Sheet.');
+        return;
+      }
+      const extractedId = extractGoogleSheetId(sheetUrl.trim());
+      if (!extractedId) {
+        setRegSheetError(
+          'Format URL Google Sheet tidak valid. Contoh: https://docs.google.com/spreadsheets/d/ID_SHEET/edit'
+        );
+        return;
+      }
+    }
 
     setRegSheetBusy(true);
     try {
       await onRegisterSheet({
         judulDataset: judulDataset.trim(),
         deskripsi: deskripsi.trim(),
-        sheetUrl: sheetUrl.trim(),
+        storageMode,
+        sheetUrl: storageMode === 'server_standalone' ? '' : sheetUrl.trim(),
         sheetName: sheetName.trim() || 'Sheet1',
         manualHeaders,
       });
@@ -625,14 +643,55 @@ export function OpdPortalWorkspace({
                 onSubmit={handleRegisterSheetSubmit}
                 className="lg:col-span-5 bg-white border border-slate-200 rounded-lg p-5 space-y-4"
               >
-                <div className="pb-3 border-b border-slate-200">
-                  <h2 className="text-base font-semibold text-slate-900">
-                    Daftarkan URL Google Sheet Baru
-                  </h2>
-                  <p className="text-xs text-slate-500 mt-0.5">
-                    Pastikan baris 1 pada Google Sheet sudah berisi nama kolom
-                    (header) data sektoral Anda.
-                  </p>
+                <div className="pb-3 border-b border-slate-200 space-y-2.5">
+                  <div>
+                    <h2 className="text-base font-semibold text-slate-900">
+                      Buat Tabel Data Baru OPD
+                    </h2>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      Pilih Tabel Mandiri Server (langsung aktif tanpa Google
+                      Sheet/Code.gs) atau hubungkan Google Sheet milik OPD.
+                    </p>
+                  </div>
+
+                  <div
+                    className="grid grid-cols-2 gap-1 p-1 bg-slate-100 rounded-md"
+                    role="tablist"
+                    aria-label="Mode penyimpanan dataset OPD"
+                  >
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={storageMode === 'server_standalone'}
+                      onClick={() => {
+                        setStorageMode('server_standalone');
+                        setRegSheetError(null);
+                      }}
+                      className={`h-8 px-2 text-[11px] font-semibold rounded transition-colors ${
+                        storageMode === 'server_standalone'
+                          ? 'bg-[#0B1B2B] text-white shadow-xs'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      Mandiri Server (Tanpa Sheet)
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={storageMode === 'google_sheet'}
+                      onClick={() => {
+                        setStorageMode('google_sheet');
+                        setRegSheetError(null);
+                      }}
+                      className={`h-8 px-2 text-[11px] font-semibold rounded transition-colors ${
+                        storageMode === 'google_sheet'
+                          ? 'bg-white text-slate-900 shadow-xs'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      Google Sheet Hybrid
+                    </button>
+                  </div>
                 </div>
 
                 {regSheetError && (
@@ -659,23 +718,25 @@ export function OpdPortalWorkspace({
                   />
                 </div>
 
-                <div>
-                  <label
-                    htmlFor="sheet-url"
-                    className="block text-xs font-medium text-slate-700 mb-1.5"
-                  >
-                    Link URL Google Sheet OPD
-                  </label>
-                  <input
-                    id="sheet-url"
-                    type="url"
-                    value={sheetUrl}
-                    onChange={(e) => setSheetUrl(e.target.value)}
-                    placeholder="https://docs.google.com/spreadsheets/d/.../edit"
-                    className="w-full h-10 px-3 text-sm bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
-                    required
-                  />
-                </div>
+                {storageMode === 'google_sheet' && (
+                  <div>
+                    <label
+                      htmlFor="sheet-url"
+                      className="block text-xs font-medium text-slate-700 mb-1.5"
+                    >
+                      Link URL Google Sheet OPD
+                    </label>
+                    <input
+                      id="sheet-url"
+                      type="url"
+                      value={sheetUrl}
+                      onChange={(e) => setSheetUrl(e.target.value)}
+                      placeholder="https://docs.google.com/spreadsheets/d/.../edit"
+                      className="w-full h-10 px-3 text-sm bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
+                      required
+                    />
+                  </div>
+                )}
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
@@ -683,7 +744,9 @@ export function OpdPortalWorkspace({
                       htmlFor="sheet-tab"
                       className="block text-xs font-medium text-slate-700 mb-1.5"
                     >
-                      Nama Tab Sheet
+                      {storageMode === 'server_standalone'
+                        ? 'Nama Tabel / Kode Tab'
+                        : 'Nama Tab Sheet'}
                     </label>
                     <input
                       id="sheet-tab"
@@ -717,7 +780,9 @@ export function OpdPortalWorkspace({
                     htmlFor="sheet-headers"
                     className="block text-xs font-medium text-slate-700 mb-1.5"
                   >
-                    Header Kolom Baris 1 (Opsional — dipisah koma)
+                    {storageMode === 'server_standalone'
+                      ? 'Daftar Kolom Tabel (Wajib — pisahkan dengan koma)'
+                      : 'Header Kolom Baris 1 (Opsional — dipisah koma)'}
                   </label>
                   <input
                     id="sheet-headers"
@@ -726,10 +791,12 @@ export function OpdPortalWorkspace({
                     onChange={(e) => setManualHeadersText(e.target.value)}
                     placeholder="Contoh: Kecamatan, Nama Puskesmas, Jumlah Dokter, Tahun"
                     className="w-full h-10 px-3 text-sm bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
+                    required={storageMode === 'server_standalone'}
                   />
                   <p className="mt-1 text-[11px] text-slate-500">
-                    Kosongkan jika Sheet dibagikan publik; sistem akan otomatis
-                    membaca header dari baris 1 Google Sheet Anda.
+                    {storageMode === 'server_standalone'
+                      ? 'Tabel dan formulir langsung aktif & tersimpan permanen di server tanpa perlu membuat Google Sheet atau cangkok Apps Script.'
+                      : 'Kosongkan jika Sheet dibagikan publik; sistem akan otomatis membaca header dari baris 1 Google Sheet Anda.'}
                   </p>
                 </div>
 
@@ -740,7 +807,9 @@ export function OpdPortalWorkspace({
                 >
                   <Plus className="w-4 h-4" />
                   {regSheetBusy
-                    ? 'Mendaftarkan Sheet...'
+                    ? 'Menyimpan Dataset...'
+                    : storageMode === 'server_standalone'
+                    ? 'Buat & Aktifkan Tabel Mandiri Server'
                     : 'Ajukan URL Sheet ke Super Admin'}
                 </button>
               </form>
@@ -792,6 +861,18 @@ export function OpdPortalWorkspace({
                                   </span>
                                 )}
                                 <span className="text-slate-300">·</span>
+                                <span
+                                  className={`font-medium ${
+                                    s.storageMode === 'server_standalone'
+                                      ? 'text-teal-700'
+                                      : 'text-slate-600'
+                                  }`}
+                                >
+                                  {s.storageMode === 'server_standalone'
+                                    ? 'Mandiri Server'
+                                    : 'Google Sheet Hybrid'}
+                                </span>
+                                <span className="text-slate-300">·</span>
                                 <span className="font-mono text-slate-500">
                                   Tab: {s.sheetName}
                                 </span>
@@ -831,17 +912,21 @@ export function OpdPortalWorkspace({
                                     isSyncing ? 'animate-spin' : ''
                                   }`}
                                 />
-                                Deteksi Header
+                                {s.storageMode === 'server_standalone'
+                                  ? 'Sinkron Server'
+                                  : 'Deteksi Header'}
                               </button>
-                              <a
-                                href={s.sheetUrl}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-md hover:bg-slate-50 whitespace-nowrap"
-                              >
-                                Sheet
-                                <ExternalLink className="w-3 h-3" />
-                              </a>
+                              {s.sheetUrl && (
+                                <a
+                                  href={s.sheetUrl}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-md hover:bg-slate-50 whitespace-nowrap"
+                                >
+                                  Sheet
+                                  <ExternalLink className="w-3 h-3" />
+                                </a>
+                              )}
                               <button
                                 type="button"
                                 onClick={() => requestProtectedSheetDelete(s)}
@@ -976,15 +1061,17 @@ export function OpdPortalWorkspace({
                         Sinkron
                       </button>
 
-                      <a
-                        href={currentSheet.sheetUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1.5 h-9 px-3 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-md hover:bg-slate-50 whitespace-nowrap"
-                      >
-                        <ExternalLink className="w-3.5 h-3.5" />
-                        Sheet
-                      </a>
+                      {currentSheet.sheetUrl && (
+                        <a
+                          href={currentSheet.sheetUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1.5 h-9 px-3 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-md hover:bg-slate-50 whitespace-nowrap"
+                        >
+                          <ExternalLink className="w-3.5 h-3.5" />
+                          Sheet
+                        </a>
+                      )}
                     </div>
                   </div>
 

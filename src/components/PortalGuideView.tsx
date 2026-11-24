@@ -253,10 +253,11 @@ export function PortalGuideView({
               },
               {
                 step: '02',
-                title: 'Daftar Akun & Masuk Wajib Menggunakan Email Terdaftar',
+                title: 'Ajukan Permohonan & Buka Pendaftaran dengan PIN Sekali Pakai',
                 points: [
-                  'Buka tab "Daftar Akun Dinas" di halaman depan, pilih nama Dinas/OPD, masukkan tautan Folder Google Drive OPD, email resmi, username, dan kata sandi (minimal 6 karakter).',
-                  'Saat masuk kembali, pilih peran "User / OPD" lalu masukkan alamat email yang sudah didaftarkan beserta kata sandinya. Email yang belum terdaftar atau berstatus Nonaktif tidak dapat masuk.',
+                  'Buka tab "Daftar Akun Dinas" → "1. Ajukan Permohonan", pilih Dinas/OPD, isi nama PIC, email resmi dinas, dan nomor WhatsApp/kontak.',
+                  'Super Admin Walidata akan meninjau permohonan dan memberikan PIN Sekali Pakai (berlaku 24 jam untuk 1x pakai). Masukkan email & PIN pada tab "2. Punya PIN Sekali Pakai" untuk membuka formulir pendaftaran Folder Drive, username, dan kata sandi.',
+                  'Saat masuk kembali, pilih peran "User / OPD" lalu masukkan email terdaftar dan kata sandinya.',
                 ],
               },
               {

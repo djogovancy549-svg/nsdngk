@@ -1216,6 +1216,1026 @@ async function startServer() {
     });
   });
 
+  // 1a-1a. Konfigurasi Google Sheet Akun & Sinkronisasi PIN Sekali Pakai ke Google Sheet (Permohonan_PIN_OPD)
+  const AUTH_SHEET_CONFIG_PATH = path.resolve(
+    __dirname,
+    'data',
+    'auth-sheet-config.json'
+  );
+
+  interface ServerAuthSheetConfig {
+    sheetUrl: string;
+    sheetId: string;
+    sheetName: string;
+    webhookUrl: string;
+    updatedAt: string;
+  }
+
+  const isPlaceholderAuthUrl = (url: string): boolean =>
+    !url ||
+    url.includes('GantiDenganIDAsli') ||
+    url.includes('WEBHOOK_GANTI_ASLI');
+
+  const extractSheetIdFromUrl = (rawUrl: string): string => {
+    const match = rawUrl.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+    return match ? match[1] : '';
+  };
+
+  const loadServerAuthSheetConfig = (): ServerAuthSheetConfig => {
+    const envWebhook = String(process.env.AUTH_SHEET_WEBHOOK_URL || '').trim();
+    const envSheetUrl = String(process.env.AUTH_SHEET_URL || '').trim();
+    const envSheetName =
+      String(process.env.AUTH_SHEET_NAME || '').trim() || 'Akun_OPD';
+    try {
+      if (fs.existsSync(AUTH_SHEET_CONFIG_PATH)) {
+        const parsed = JSON.parse(
+          fs.readFileSync(AUTH_SHEET_CONFIG_PATH, 'utf8')
+        ) as Partial<ServerAuthSheetConfig>;
+        const sheetUrl = String(parsed.sheetUrl || envSheetUrl || '').trim();
+        return {
+          sheetUrl,
+          sheetId:
+            String(parsed.sheetId || '').trim() ||
+            extractSheetIdFromUrl(sheetUrl),
+          sheetName: String(parsed.sheetName || envSheetName).trim() || 'Akun_OPD',
+          webhookUrl: String(parsed.webhookUrl || envWebhook || '').trim(),
+          updatedAt: String(parsed.updatedAt || ''),
+        };
+      }
+    } catch {
+      // Abaikan
+    }
+    return {
+      sheetUrl: envSheetUrl,
+      sheetId: extractSheetIdFromUrl(envSheetUrl),
+      sheetName: envSheetName,
+      webhookUrl: envWebhook,
+      updatedAt: '',
+    };
+  };
+
+  const saveServerAuthSheetConfig = (
+    next: Partial<ServerAuthSheetConfig>
+  ): ServerAuthSheetConfig => {
+    const sheetUrl = String(next.sheetUrl ?? '').trim();
+    const saved: ServerAuthSheetConfig = {
+      sheetUrl,
+      sheetId: String(next.sheetId || extractSheetIdFromUrl(sheetUrl)).trim(),
+      sheetName: String(next.sheetName || 'Akun_OPD').trim() || 'Akun_OPD',
+      webhookUrl: String(next.webhookUrl ?? '').trim(),
+      updatedAt: new Date().toISOString(),
+    };
+    try {
+      const dir = path.dirname(AUTH_SHEET_CONFIG_PATH);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(
+        AUTH_SHEET_CONFIG_PATH,
+        JSON.stringify(saved, null, 2),
+        'utf8'
+      );
+    } catch {
+      // Tetap aktif di memori
+    }
+    return saved;
+  };
+
+  let activeAuthSheetServerConfig: ServerAuthSheetConfig =
+    loadServerAuthSheetConfig();
+
+  const isAuthSheetWebhookConfigured = (): boolean =>
+    !isPlaceholderAuthUrl(activeAuthSheetServerConfig.webhookUrl) &&
+    isAllowedGoogleScriptUrl(activeAuthSheetServerConfig.webhookUrl);
+
+  app.get('/api/auth/sheet-config', (req, res) => {
+    if (!requireSuperAdminActor(req, res)) return;
+    return res.json({
+      ok: true,
+      configured: isAuthSheetWebhookConfigured(),
+      config: activeAuthSheetServerConfig,
+    });
+  });
+
+  app.put('/api/auth/sheet-config', (req, res) => {
+    if (!requireSuperAdminActor(req, res)) return;
+    const sheetUrl = String(req.body?.sheetUrl ?? '').trim();
+    const sheetName =
+      String(req.body?.sheetName ?? 'Akun_OPD').trim() || 'Akun_OPD';
+    const webhookUrl = String(req.body?.webhookUrl ?? '').trim();
+
+    if (webhookUrl && !isAllowedGoogleScriptUrl(webhookUrl)) {
+      return res.status(400).json({
+        ok: false,
+        message:
+          'URL Webhook Google Sheet Akun harus berupa URL resmi Google Apps Script (https://script.google.com/macros/s/.../exec).',
+      });
+    }
+
+    activeAuthSheetServerConfig = saveServerAuthSheetConfig({
+      sheetUrl,
+      sheetId: extractSheetIdFromUrl(sheetUrl),
+      sheetName,
+      webhookUrl,
+    });
+
+    return res.json({
+      ok: true,
+      configured: isAuthSheetWebhookConfigured(),
+      config: activeAuthSheetServerConfig,
+      message: isAuthSheetWebhookConfigured()
+        ? 'Konfigurasi Google Sheet Akun & PIN tersimpan di server. Seluruh permohonan & PIN otomatis tercatat ke tab Permohonan_PIN_OPD.'
+        : 'Konfigurasi Google Sheet Akun diperbarui di server.',
+    });
+  });
+
+  // 1a-1b. Permohonan Pendaftaran Akun Dinas & PIN Sekali Pakai (Wajib Disetujui Super Admin & Terdata di Google Sheet)
+  const OPD_REG_REQUESTS_PATH = path.resolve(
+    __dirname,
+    'data',
+    'opd-registration-requests.json'
+  );
+  const PIN_TTL_MS = 24 * 60 * 60 * 1000; // Berlaku 24 jam sebelum dipakai
+  const UNLOCK_TOKEN_TTL_MS = 15 * 60 * 1000; // Token buka formulir berlaku 15 menit
+  const MAX_PIN_FAILED_ATTEMPTS = 5;
+  const PIN_SHEET_TAB_NAME = 'Permohonan_PIN_OPD';
+
+  type ServerRegRequestStatus =
+    | 'Menunggu Persetujuan'
+    | 'PIN Diterbitkan'
+    | 'Sudah Digunakan'
+    | 'Ditolak';
+
+  interface OpdRegistrationRequestRecord {
+    id: string;
+    opdId: string;
+    namaOpd: string;
+    namaPemohon: string;
+    jabatan: string;
+    emailPemohon: string;
+    nomorKontak: string;
+    alasanPengajuan: string;
+    status: ServerRegRequestStatus;
+    pinHash: string | null;
+    pinSalt: string | null;
+    pinHint: string | null;
+    pinFailedAttempts: number;
+    pinIssuedAt: string | null;
+    pinExpiresAt: string | null;
+    approvedBy: string | null;
+    catatanAdmin: string | null;
+    dibuatPada: string;
+    digunakanPada: string | null;
+    syncedToSheet?: boolean;
+  }
+
+  interface RegistrationUnlockTokenPayload {
+    purpose: 'opd_register_unlock';
+    requestId: string;
+    email: string;
+    exp: number;
+  }
+
+  const pinVerifyAttemptsByIp = new Map<string, RateLimitState>();
+
+  const loadOpdRegistrationRequests = (): OpdRegistrationRequestRecord[] => {
+    try {
+      if (fs.existsSync(OPD_REG_REQUESTS_PATH)) {
+        const raw = fs.readFileSync(OPD_REG_REQUESTS_PATH, 'utf8');
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          return parsed as OpdRegistrationRequestRecord[];
+        }
+      }
+    } catch {
+      // Abaikan jika file belum ada atau rusak
+    }
+    return [];
+  };
+
+  const saveOpdRegistrationRequests = (
+    items: OpdRegistrationRequestRecord[]
+  ) => {
+    try {
+      const dir = path.dirname(OPD_REG_REQUESTS_PATH);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      fs.writeFileSync(
+        OPD_REG_REQUESTS_PATH,
+        JSON.stringify(items, null, 2),
+        'utf8'
+      );
+    } catch {
+      // Tetap simpan di memori jika filesystem read-only
+    }
+  };
+
+  let opdRegistrationRequests: OpdRegistrationRequestRecord[] =
+    loadOpdRegistrationRequests();
+
+  const toPublicRegistrationRequestView = (
+    rec: OpdRegistrationRequestRecord
+  ) => ({
+    id: rec.id,
+    opdId: rec.opdId,
+    namaOpd: rec.namaOpd,
+    namaPemohon: rec.namaPemohon,
+    jabatan: rec.jabatan,
+    emailPemohon: rec.emailPemohon,
+    nomorKontak: rec.nomorKontak,
+    alasanPengajuan: rec.alasanPengajuan,
+    status: rec.status,
+    pinHint: rec.pinHint,
+    pinIssuedAt: rec.pinIssuedAt,
+    pinExpiresAt: rec.pinExpiresAt,
+    approvedBy: rec.approvedBy,
+    catatanAdmin: rec.catatanAdmin,
+    dibuatPada: rec.dibuatPada,
+    digunakanPada: rec.digunakanPada,
+    syncedToSheet: Boolean(rec.syncedToSheet),
+  });
+
+  const serializePinRequestForSheet = (rec: OpdRegistrationRequestRecord) => ({
+    id: rec.id,
+    opdId: rec.opdId,
+    namaOpd: rec.namaOpd,
+    namaPemohon: rec.namaPemohon,
+    jabatan: rec.jabatan,
+    emailPemohon: rec.emailPemohon,
+    nomorKontak: rec.nomorKontak,
+    alasanPengajuan: rec.alasanPengajuan,
+    status: rec.status,
+    pinHint: rec.pinHint || '',
+    pinHash: rec.pinHash || '',
+    pinSalt: rec.pinSalt || '',
+    pinFailedAttempts: rec.pinFailedAttempts || 0,
+    pinIssuedAt: rec.pinIssuedAt || '',
+    pinExpiresAt: rec.pinExpiresAt || '',
+    approvedBy: rec.approvedBy || '',
+    catatanAdmin: rec.catatanAdmin || '',
+    dibuatPada: rec.dibuatPada,
+    digunakanPada: rec.digunakanPada || '',
+  });
+
+  const syncPinRequestToGoogleSheet = async (
+    record: OpdRegistrationRequestRecord
+  ): Promise<boolean> => {
+    if (!isAuthSheetWebhookConfigured()) return false;
+    try {
+      const upstream = await fetch(activeAuthSheetServerConfig.webhookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        redirect: 'follow',
+        body: JSON.stringify({
+          action: 'upsertPinRequest',
+          pinSheetName: PIN_SHEET_TAB_NAME,
+          secret: serverSecrets.appsScriptSecret,
+          request: serializePinRequestForSheet(record),
+        }),
+      });
+      if (!upstream.ok) return false;
+      const json = (await upstream.json().catch(() => null)) as {
+        ok?: boolean;
+      } | null;
+      return Boolean(json?.ok);
+    } catch {
+      return false;
+    }
+  };
+
+  const batchSyncPinRequestsToGoogleSheet = async (
+    records: OpdRegistrationRequestRecord[]
+  ): Promise<boolean> => {
+    if (!isAuthSheetWebhookConfigured() || records.length === 0) return false;
+    try {
+      const upstream = await fetch(activeAuthSheetServerConfig.webhookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        redirect: 'follow',
+        body: JSON.stringify({
+          action: 'syncPinRequests',
+          pinSheetName: PIN_SHEET_TAB_NAME,
+          secret: serverSecrets.appsScriptSecret,
+          requests: records.map(serializePinRequestForSheet),
+        }),
+      });
+      if (!upstream.ok) return false;
+      const json = (await upstream.json().catch(() => null)) as {
+        ok?: boolean;
+      } | null;
+      return Boolean(json?.ok);
+    } catch {
+      return false;
+    }
+  };
+
+  const fetchPinRequestsFromGoogleSheet = async (): Promise<
+    OpdRegistrationRequestRecord[] | null
+  > => {
+    if (!isAuthSheetWebhookConfigured()) return null;
+    try {
+      const targetUrl = new URL(activeAuthSheetServerConfig.webhookUrl);
+      targetUrl.searchParams.set('action', 'listPinRequests');
+      targetUrl.searchParams.set('sheet', PIN_SHEET_TAB_NAME);
+      targetUrl.searchParams.set('secret', serverSecrets.appsScriptSecret);
+      const upstream = await fetch(targetUrl.toString(), {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+        redirect: 'follow',
+      });
+      if (!upstream.ok) return null;
+      const json = (await upstream.json().catch(() => null)) as {
+        ok?: boolean;
+        data?: Array<Record<string, unknown>>;
+      } | null;
+      if (!json?.ok || !Array.isArray(json.data)) return null;
+
+      return json.data
+        .filter((row) => String(row.id || '').trim().length > 0)
+        .map((row) => {
+          const rawStatus = String(row.status || 'Menunggu Persetujuan').trim();
+          const status: ServerRegRequestStatus =
+            rawStatus === 'PIN Diterbitkan' ||
+            rawStatus === 'Sudah Digunakan' ||
+            rawStatus === 'Ditolak'
+              ? rawStatus
+              : 'Menunggu Persetujuan';
+          return {
+            id: String(row.id).trim(),
+            opdId: String(row.opdId || '').trim(),
+            namaOpd: String(row.namaOpd || '').trim(),
+            namaPemohon: String(row.namaPemohon || '').trim(),
+            jabatan: String(row.jabatan || 'Operator / PIC Satu Data OPD').trim(),
+            emailPemohon: normalizeEmail(row.emailPemohon),
+            nomorKontak: String(row.nomorKontak || '').trim(),
+            alasanPengajuan: String(row.alasanPengajuan || '').trim(),
+            status,
+            pinHash: String(row.pinHash || '').trim() || null,
+            pinSalt: String(row.pinSalt || '').trim() || null,
+            pinHint: String(row.pinHint || '').trim() || null,
+            pinFailedAttempts: Number(row.pinFailedAttempts || 0) || 0,
+            pinIssuedAt: String(row.pinIssuedAt || '').trim() || null,
+            pinExpiresAt: String(row.pinExpiresAt || '').trim() || null,
+            approvedBy: String(row.approvedBy || '').trim() || null,
+            catatanAdmin: String(row.catatanAdmin || '').trim() || null,
+            dibuatPada:
+              String(row.dibuatPada || '').trim() || new Date().toISOString(),
+            digunakanPada: String(row.digunakanPada || '').trim() || null,
+            syncedToSheet: true,
+          };
+        });
+    } catch {
+      return null;
+    }
+  };
+
+  const mergeRequestsWithRemoteSheet = (
+    localList: OpdRegistrationRequestRecord[],
+    remoteList: OpdRegistrationRequestRecord[]
+  ): OpdRegistrationRequestRecord[] => {
+    const map = new Map<string, OpdRegistrationRequestRecord>();
+    for (const r of remoteList) {
+      map.set(r.id, r);
+    }
+    for (const l of localList) {
+      const existing = map.get(l.id);
+      if (!existing) {
+        map.set(l.id, l);
+      } else {
+        // Prioritaskan status yang lebih lanjut jika salah satu Sudah Digunakan / Ditolak
+        const rank = (s: ServerRegRequestStatus) =>
+          s === 'Sudah Digunakan'
+            ? 4
+            : s === 'Ditolak'
+            ? 3
+            : s === 'PIN Diterbitkan'
+            ? 2
+            : 1;
+        map.set(
+          l.id,
+          rank(l.status) >= rank(existing.status)
+            ? { ...existing, ...l, syncedToSheet: l.syncedToSheet || existing.syncedToSheet }
+            : existing
+        );
+      }
+    }
+    return Array.from(map.values()).sort((a, b) =>
+      b.dibuatPada.localeCompare(a.dibuatPada)
+    );
+  };
+
+  const normalizeOneTimePin = (raw: unknown): string =>
+    String(raw ?? '')
+      .toUpperCase()
+      .replace(/[^A-Z0-9]/g, '');
+
+  const generateUnambiguousOneTimePin = (): string => {
+    const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    const bytes = crypto.randomBytes(8);
+    let raw = '';
+    for (let i = 0; i < 8; i++) {
+      raw += alphabet[bytes[i] % alphabet.length];
+    }
+    return `${raw.slice(0, 4)}-${raw.slice(4, 8)}`;
+  };
+
+  const hashOneTimePin = (normalizedPin: string, salt: string): string =>
+    crypto.scryptSync(normalizedPin, salt, 64).toString('hex');
+
+  const createRegistrationUnlockToken = (
+    requestId: string,
+    email: string
+  ): string => {
+    const payload: RegistrationUnlockTokenPayload = {
+      purpose: 'opd_register_unlock',
+      requestId,
+      email: normalizeEmail(email),
+      exp: Date.now() + UNLOCK_TOKEN_TTL_MS,
+    };
+    const data = Buffer.from(JSON.stringify(payload), 'utf8').toString(
+      'base64url'
+    );
+    const sig = crypto
+      .createHmac('sha256', serverSecrets.sessionSecret)
+      .update(data)
+      .digest('base64url');
+    return `${data}.${sig}`;
+  };
+
+  const verifyRegistrationUnlockToken = (
+    token: string
+  ): RegistrationUnlockTokenPayload | null => {
+    if (!token || !token.includes('.')) return null;
+    const [data, sig] = token.split('.');
+    if (!data || !sig) return null;
+    const expectedSig = crypto
+      .createHmac('sha256', serverSecrets.sessionSecret)
+      .update(data)
+      .digest('base64url');
+    if (!timingSafeEqualStr(sig, expectedSig)) return null;
+    try {
+      const parsed = JSON.parse(
+        Buffer.from(data, 'base64url').toString('utf8')
+      ) as RegistrationUnlockTokenPayload;
+      if (
+        parsed.purpose !== 'opd_register_unlock' ||
+        !parsed.requestId ||
+        !parsed.email ||
+        !parsed.exp
+      ) {
+        return null;
+      }
+      if (Date.now() > parsed.exp) return null;
+      return parsed;
+    } catch {
+      return null;
+    }
+  };
+
+  // Publik: Dinas mengajukan permohonan akun baru (sebelum diberi PIN oleh Super Admin)
+  app.post('/api/auth/opd-registration-requests', async (req, res) => {
+    const body = req.body || {};
+    const opdId = String(body.opdId ?? '').trim().slice(0, 80);
+    const namaOpd = String(body.namaOpd ?? '').trim().slice(0, 180);
+    const namaPemohon = String(body.namaPemohon ?? '').trim().slice(0, 140);
+    const jabatan = String(body.jabatan ?? '').trim().slice(0, 120);
+    const emailPemohon = normalizeEmail(body.emailPemohon);
+    const nomorKontak = String(body.nomorKontak ?? '').trim().slice(0, 40);
+    const alasanPengajuan = String(body.alasanPengajuan ?? '')
+      .trim()
+      .slice(0, 500);
+
+    if (!namaOpd || !namaPemohon || !nomorKontak) {
+      return res.status(400).json({
+        ok: false,
+        message:
+          'Nama Dinas/OPD, nama pemohon/PIC, dan nomor WhatsApp/kontak wajib diisi.',
+      });
+    }
+
+    if (!EMAIL_PATTERN.test(emailPemohon)) {
+      return res.status(400).json({
+        ok: false,
+        message: 'Format email resmi dinas tidak valid.',
+      });
+    }
+
+    if (isAuthorizedSuperAdminEmail(emailPemohon)) {
+      return res.status(400).json({
+        ok: false,
+        message:
+          'Email tersebut terdaftar sebagai email Super Admin dan tidak dapat diajukan sebagai akun OPD.',
+      });
+    }
+
+    const now = Date.now();
+    const existingActive = opdRegistrationRequests.find((r) => {
+      if (r.emailPemohon !== emailPemohon) return false;
+      if (r.status === 'Menunggu Persetujuan') return true;
+      if (r.status === 'PIN Diterbitkan') {
+        const expMs = r.pinExpiresAt ? Date.parse(r.pinExpiresAt) : 0;
+        return expMs > now;
+      }
+      return false;
+    });
+
+    if (existingActive) {
+      return res.status(409).json({
+        ok: false,
+        message:
+          existingActive.status === 'PIN Diterbitkan'
+            ? 'Email dinas ini sudah memiliki PIN aktif yang diterbitkan Super Admin. Gunakan PIN tersebut pada tab "Masuk dengan PIN Sekali Pakai".'
+            : 'Permohonan untuk email dinas ini sudah masuk antrean dan sedang menunggu persetujuan Super Admin Walidata.',
+      });
+    }
+
+    const record: OpdRegistrationRequestRecord = {
+      id: `req-${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`,
+      opdId:
+        opdId ||
+        namaOpd
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/(^-|-$)/g, ''),
+      namaOpd,
+      namaPemohon,
+      jabatan: jabatan || 'Operator / PIC Satu Data OPD',
+      emailPemohon,
+      nomorKontak,
+      alasanPengajuan,
+      status: 'Menunggu Persetujuan',
+      pinHash: null,
+      pinSalt: null,
+      pinHint: null,
+      pinFailedAttempts: 0,
+      pinIssuedAt: null,
+      pinExpiresAt: null,
+      approvedBy: null,
+      catatanAdmin: null,
+      dibuatPada: new Date().toISOString(),
+      digunakanPada: null,
+      syncedToSheet: false,
+    };
+
+    const syncedToSheet = await syncPinRequestToGoogleSheet(record);
+    record.syncedToSheet = syncedToSheet;
+
+    opdRegistrationRequests = [record, ...opdRegistrationRequests].slice(0, 300);
+    saveOpdRegistrationRequests(opdRegistrationRequests);
+
+    return res.status(201).json({
+      ok: true,
+      syncedToSheet,
+      request: toPublicRegistrationRequestView(record),
+      message: syncedToSheet
+        ? 'Permohonan pendaftaran berhasil dikirim dan tercatat di Google Sheet Walidata. Tunggu persetujuan & PIN Sekali Pakai dari Super Admin.'
+        : 'Permohonan pendaftaran akun dinas berhasil dikirim. Super Admin Walidata akan meninjau dan memberikan PIN Sekali Pakai kepada PIC Anda.',
+    });
+  });
+
+  // Super Admin: Lihat seluruh antrean permohonan pendaftaran dinas (tarik juga dari Google Sheet bila terhubung)
+  app.get('/api/auth/opd-registration-requests', async (req, res) => {
+    if (!requireSuperAdminActor(req, res)) return;
+    const sheetConfigured = isAuthSheetWebhookConfigured();
+    if (sheetConfigured) {
+      const remoteRows = await fetchPinRequestsFromGoogleSheet();
+      if (remoteRows && remoteRows.length > 0) {
+        opdRegistrationRequests = mergeRequestsWithRemoteSheet(
+          opdRegistrationRequests,
+          remoteRows
+        );
+        saveOpdRegistrationRequests(opdRegistrationRequests);
+      }
+    }
+
+    const sorted = [...opdRegistrationRequests].sort((a, b) =>
+      b.dibuatPada.localeCompare(a.dibuatPada)
+    );
+    const pendingCount = sorted.filter(
+      (r) => r.status === 'Menunggu Persetujuan'
+    ).length;
+
+    return res.json({
+      ok: true,
+      sheetConfigured,
+      pendingCount,
+      requests: sorted.map(toPublicRegistrationRequestView),
+    });
+  });
+
+  // Super Admin: Sinkronkan seluruh antrean & status PIN dua arah ke tab Permohonan_PIN_OPD Google Sheet
+  app.post('/api/auth/opd-registration-requests/sync-sheet', async (req, res) => {
+    if (!requireSuperAdminActor(req, res)) return;
+    const sheetConfigured = isAuthSheetWebhookConfigured();
+    if (!sheetConfigured) {
+      return res.status(400).json({
+        ok: false,
+        sheetConfigured: false,
+        message:
+          'Google Sheet Akun & PIN belum dihubungkan. Buka menu Skrip Code.gs & Auth lalu simpan URL Sheet & Webhook Code_Akun_OPD.gs terlebih dahulu.',
+      });
+    }
+
+    const remoteRows = await fetchPinRequestsFromGoogleSheet();
+    if (remoteRows) {
+      opdRegistrationRequests = mergeRequestsWithRemoteSheet(
+        opdRegistrationRequests,
+        remoteRows
+      );
+    }
+
+    let pushed = true;
+    if (opdRegistrationRequests.length > 0) {
+      pushed = await batchSyncPinRequestsToGoogleSheet(opdRegistrationRequests);
+      if (pushed) {
+        opdRegistrationRequests = opdRegistrationRequests.map((r) => ({
+          ...r,
+          syncedToSheet: true,
+        }));
+      }
+    }
+    saveOpdRegistrationRequests(opdRegistrationRequests);
+
+    const sorted = [...opdRegistrationRequests].sort((a, b) =>
+      b.dibuatPada.localeCompare(a.dibuatPada)
+    );
+    return res.json({
+      ok: pushed,
+      sheetConfigured: true,
+      syncedCount: sorted.length,
+      pendingCount: sorted.filter((r) => r.status === 'Menunggu Persetujuan')
+        .length,
+      requests: sorted.map(toPublicRegistrationRequestView),
+      message: pushed
+        ? `Berhasil menyinkronkan ${sorted.length} catatan permohonan & PIN Sekali Pakai ke tab ${PIN_SHEET_TAB_NAME} Google Sheet.`
+        : `Gagal menulis ke Webhook Code_Akun_OPD.gs. Pastikan Anda memakai skrip Code_Akun_OPD.gs versi terbaru dan telah di-deploy ulang.`,
+    });
+  });
+
+  // Super Admin: Setujui permohonan & terbitkan PIN Sekali Pakai (otomatis tercatat di Google Sheet)
+  app.post(
+    '/api/auth/opd-registration-requests/:id/issue-pin',
+    async (req, res) => {
+      const actorEmail = requireSuperAdminActor(req, res);
+      if (!actorEmail) return;
+
+      const reqId = String(req.params.id || '').trim();
+      const target = opdRegistrationRequests.find((r) => r.id === reqId);
+      if (!target) {
+        return res.status(404).json({
+          ok: false,
+          message: 'Permohonan pendaftaran tidak ditemukan.',
+        });
+      }
+
+      if (target.status === 'Sudah Digunakan') {
+        return res.status(409).json({
+          ok: false,
+          message:
+            'Permohonan ini sudah digunakan untuk mendaftarkan akun dinas dan tidak dapat diterbitkan ulang.',
+        });
+      }
+
+      if (target.status === 'Ditolak') {
+        return res.status(409).json({
+          ok: false,
+          message:
+            'Permohonan yang telah ditolak tidak dapat diberi PIN. Minta dinas mengajukan permohonan baru.',
+        });
+      }
+
+      const rawPin = generateUnambiguousOneTimePin();
+      const normalized = normalizeOneTimePin(rawPin);
+      const salt = crypto.randomBytes(16).toString('hex');
+      const pinHash = hashOneTimePin(normalized, salt);
+      const nowIso = new Date().toISOString();
+      const expiresIso = new Date(Date.now() + PIN_TTL_MS).toISOString();
+      const catatanAdmin = String(req.body?.catatanAdmin ?? '')
+        .trim()
+        .slice(0, 400);
+
+      const updated: OpdRegistrationRequestRecord = {
+        ...target,
+        status: 'PIN Diterbitkan',
+        pinHash,
+        pinSalt: salt,
+        pinHint: `••••${normalized.slice(-2)}`,
+        pinFailedAttempts: 0,
+        pinIssuedAt: nowIso,
+        pinExpiresAt: expiresIso,
+        approvedBy: actorEmail,
+        catatanAdmin: catatanAdmin || target.catatanAdmin,
+        syncedToSheet: false,
+      };
+
+      const syncedToSheet = await syncPinRequestToGoogleSheet(updated);
+      updated.syncedToSheet = syncedToSheet;
+
+      opdRegistrationRequests = opdRegistrationRequests.map((r) =>
+        r.id === reqId ? updated : r
+      );
+      saveOpdRegistrationRequests(opdRegistrationRequests);
+
+      return res.status(200).json({
+        ok: true,
+        oneTimePin: rawPin,
+        syncedToSheet,
+        request: toPublicRegistrationRequestView(updated),
+        message: syncedToSheet
+          ? `PIN Sekali Pakai berhasil diterbitkan untuk ${updated.namaOpd} dan langsung terdata di Google Sheet (tab ${PIN_SHEET_TAB_NAME}).`
+          : `PIN Sekali Pakai berhasil diterbitkan untuk ${updated.namaOpd} (tersimpan di server; hubungkan Google Sheet Akun di menu Skrip Code.gs & Auth agar otomatis tercatat ke Google Sheet).`,
+      });
+    }
+  );
+
+  // Super Admin: Tolak permohonan pendaftaran dinas
+  app.post(
+    '/api/auth/opd-registration-requests/:id/reject',
+    async (req, res) => {
+      const actorEmail = requireSuperAdminActor(req, res);
+      if (!actorEmail) return;
+
+      const reqId = String(req.params.id || '').trim();
+      const target = opdRegistrationRequests.find((r) => r.id === reqId);
+      if (!target) {
+        return res.status(404).json({
+          ok: false,
+          message: 'Permohonan pendaftaran tidak ditemukan.',
+        });
+      }
+
+      if (target.status === 'Sudah Digunakan') {
+        return res.status(409).json({
+          ok: false,
+          message: 'Permohonan ini sudah selesai digunakan.',
+        });
+      }
+
+      const catatanAdmin = String(req.body?.catatanAdmin ?? '')
+        .trim()
+        .slice(0, 400);
+
+      const updated: OpdRegistrationRequestRecord = {
+        ...target,
+        status: 'Ditolak',
+        pinHash: null,
+        pinSalt: null,
+        pinHint: null,
+        pinFailedAttempts: 0,
+        approvedBy: actorEmail,
+        catatanAdmin:
+          catatanAdmin || 'Permohonan ditolak oleh Super Admin Walidata.',
+        syncedToSheet: false,
+      };
+
+      const syncedToSheet = await syncPinRequestToGoogleSheet(updated);
+      updated.syncedToSheet = syncedToSheet;
+
+      opdRegistrationRequests = opdRegistrationRequests.map((r) =>
+        r.id === reqId ? updated : r
+      );
+      saveOpdRegistrationRequests(opdRegistrationRequests);
+
+      return res.status(200).json({
+        ok: true,
+        syncedToSheet,
+        request: toPublicRegistrationRequestView(updated),
+        message: syncedToSheet
+          ? `Permohonan dari ${updated.namaOpd} telah ditolak dan diperbarui di Google Sheet.`
+          : `Permohonan dari ${updated.namaOpd} telah ditolak.`,
+      });
+    }
+  );
+
+  // Publik: Verifikasi Email + PIN Sekali Pakai untuk membuka laman formulir pendaftaran dinas
+  app.post(
+    '/api/auth/opd-registration-requests/verify-pin',
+    async (req, res) => {
+      const ip = getClientIp(req);
+      const now = Date.now();
+      const ipState = pinVerifyAttemptsByIp.get(ip) || {
+        attempts: 0,
+        lockedUntil: 0,
+      };
+
+      if (ipState.lockedUntil > now) {
+        const retryAfterSec = Math.ceil((ipState.lockedUntil - now) / 1000);
+        return res.status(429).json({
+          ok: false,
+          locked: true,
+          retryAfterSec,
+          message: `Terlalu banyak percobaan PIN salah. Verifikasi dikunci selama ${retryAfterSec} detik.`,
+        });
+      }
+
+      const emailPemohon = normalizeEmail(req.body?.emailPemohon);
+      const normalizedPin = normalizeOneTimePin(req.body?.pin);
+
+      if (!EMAIL_PATTERN.test(emailPemohon) || normalizedPin.length < 6) {
+        return res.status(400).json({
+          ok: false,
+          message:
+            'Masukkan email resmi pemohon dan PIN Sekali Pakai yang valid.',
+        });
+      }
+
+      let candidates = opdRegistrationRequests.filter(
+        (r) => r.emailPemohon === emailPemohon
+      );
+      let activeReq = candidates.find((r) => r.status === 'PIN Diterbitkan');
+
+      // Jika tidak ditemukan di memori (misal setelah restart), cek ke Google Sheet Permohonan_PIN_OPD
+      if (!activeReq && isAuthSheetWebhookConfigured()) {
+        const remoteRows = await fetchPinRequestsFromGoogleSheet();
+        if (remoteRows && remoteRows.length > 0) {
+          opdRegistrationRequests = mergeRequestsWithRemoteSheet(
+            opdRegistrationRequests,
+            remoteRows
+          );
+          saveOpdRegistrationRequests(opdRegistrationRequests);
+          candidates = opdRegistrationRequests.filter(
+            (r) => r.emailPemohon === emailPemohon
+          );
+          activeReq = candidates.find((r) => r.status === 'PIN Diterbitkan');
+        }
+      }
+
+      if (!activeReq || !activeReq.pinHash || !activeReq.pinSalt) {
+        const alreadyUsed = candidates.some(
+          (r) => r.status === 'Sudah Digunakan'
+        );
+        const stillPending = candidates.some(
+          (r) => r.status === 'Menunggu Persetujuan'
+        );
+        return res.status(401).json({
+          ok: false,
+          message: alreadyUsed
+            ? 'PIN untuk email ini sudah pernah digunakan. Satu PIN hanya berlaku untuk 1 kali pendaftaran.'
+            : stillPending
+            ? 'Permohonan Anda masih menunggu persetujuan dan penerbitan PIN oleh Super Admin Walidata.'
+            : 'Tidak ada PIN Sekali Pakai yang aktif untuk email tersebut.',
+        });
+      }
+
+      if (
+        activeReq.pinExpiresAt &&
+        Date.now() > Date.parse(activeReq.pinExpiresAt)
+      ) {
+        return res.status(401).json({
+          ok: false,
+          message:
+            'PIN Sekali Pakai telah kedaluwarsa (melebihi 24 jam). Minta Super Admin menerbitkan PIN baru.',
+        });
+      }
+
+      const candidateHash = hashOneTimePin(normalizedPin, activeReq.pinSalt);
+      if (!timingSafeEqualStr(candidateHash, activeReq.pinHash)) {
+        const nextReqFails = (activeReq.pinFailedAttempts || 0) + 1;
+        const nextIpFails = ipState.attempts + 1;
+
+        if (nextReqFails >= MAX_PIN_FAILED_ATTEMPTS) {
+          const invalidated: OpdRegistrationRequestRecord = {
+            ...activeReq,
+            status: 'Ditolak',
+            pinHash: null,
+            pinSalt: null,
+            pinHint: null,
+            pinFailedAttempts: nextReqFails,
+            catatanAdmin:
+              'PIN otomatis dibatalkan karena melebihi batas 5 kali percobaan gagal.',
+          };
+          invalidated.syncedToSheet = await syncPinRequestToGoogleSheet(
+            invalidated
+          );
+          opdRegistrationRequests = opdRegistrationRequests.map((r) =>
+            r.id === activeReq!.id ? invalidated : r
+          );
+          saveOpdRegistrationRequests(opdRegistrationRequests);
+          recordServerIntrusion(
+            ip,
+            '/api/auth/opd-registration-requests/verify-pin',
+            'Brute-Force PIN Pendaftaran Dinas',
+            `PIN untuk ${emailPemohon} dibatalkan otomatis setelah 5 kali percobaan salah.`,
+            'Tinggi'
+          );
+        } else {
+          const updatedFail: OpdRegistrationRequestRecord = {
+            ...activeReq,
+            pinFailedAttempts: nextReqFails,
+          };
+          updatedFail.syncedToSheet = await syncPinRequestToGoogleSheet(
+            updatedFail
+          );
+          opdRegistrationRequests = opdRegistrationRequests.map((r) =>
+            r.id === activeReq!.id ? updatedFail : r
+          );
+          saveOpdRegistrationRequests(opdRegistrationRequests);
+        }
+
+        const lockedUntil =
+          nextIpFails >= MAX_PIN_FAILED_ATTEMPTS ? now + LOCKOUT_MS : 0;
+        pinVerifyAttemptsByIp.set(ip, {
+          attempts: nextIpFails >= MAX_PIN_FAILED_ATTEMPTS ? 0 : nextIpFails,
+          lockedUntil,
+        });
+
+        const remaining = Math.max(0, MAX_PIN_FAILED_ATTEMPTS - nextReqFails);
+        return res.status(remaining === 0 ? 429 : 401).json({
+          ok: false,
+          message:
+            remaining === 0
+              ? 'PIN salah 5 kali berturut-turut dan langsung dibatalkan demi keamanan. Ajukan permohonan baru ke Super Admin.'
+              : `PIN Sekali Pakai tidak sesuai. Sisa percobaan: ${remaining}.`,
+        });
+      }
+
+      // PIN valid -> reset counter gagal & keluarkan unlock token berumur pendek (15 menit)
+      pinVerifyAttemptsByIp.delete(ip);
+      if (activeReq.pinFailedAttempts > 0) {
+        const resetFail: OpdRegistrationRequestRecord = {
+          ...activeReq,
+          pinFailedAttempts: 0,
+        };
+        resetFail.syncedToSheet = await syncPinRequestToGoogleSheet(resetFail);
+        opdRegistrationRequests = opdRegistrationRequests.map((r) =>
+          r.id === activeReq!.id ? resetFail : r
+        );
+        saveOpdRegistrationRequests(opdRegistrationRequests);
+      }
+
+      const unlockToken = createRegistrationUnlockToken(
+        activeReq.id,
+        activeReq.emailPemohon
+      );
+
+      return res.status(200).json({
+        ok: true,
+        unlockToken,
+        request: toPublicRegistrationRequestView(activeReq),
+        message:
+          'PIN Sekali Pakai terverifikasi. Laman pendaftaran akun dinas terbuka selama 15 menit untuk 1 kali pengiriman.',
+      });
+    }
+  );
+
+  // Publik: Konsumsi atomik PIN Sekali Pakai saat dinas menyelesaikan pendaftaran akun + catat di Google Sheet
+  app.post(
+    '/api/auth/opd-registration-requests/consume',
+    async (req, res) => {
+      const unlockToken = String(req.body?.unlockToken ?? '').trim();
+      const email = normalizeEmail(req.body?.email);
+
+      const verified = verifyRegistrationUnlockToken(unlockToken);
+      if (!verified || verified.email !== email) {
+        return res.status(403).json({
+          ok: false,
+          message:
+            'Token otorisasi PIN pendaftaran tidak valid, kedaluwarsa, atau tidak sesuai dengan email pemohon.',
+        });
+      }
+
+      const target = opdRegistrationRequests.find(
+        (r) => r.id === verified.requestId
+      );
+      if (
+        !target ||
+        target.status !== 'PIN Diterbitkan' ||
+        target.emailPemohon !== email
+      ) {
+        return res.status(409).json({
+          ok: false,
+          message:
+            'PIN Sekali Pakai ini sudah digunakan atau dibatalkan dan tidak dapat dipakai ulang.',
+        });
+      }
+
+      const consumed: OpdRegistrationRequestRecord = {
+        ...target,
+        status: 'Sudah Digunakan',
+        pinHash: null,
+        pinSalt: null,
+        digunakanPada: new Date().toISOString(),
+        syncedToSheet: false,
+      };
+
+      const syncedToSheet = await syncPinRequestToGoogleSheet(consumed);
+      consumed.syncedToSheet = syncedToSheet;
+
+      opdRegistrationRequests = opdRegistrationRequests.map((r) =>
+        r.id === target.id ? consumed : r
+      );
+      saveOpdRegistrationRequests(opdRegistrationRequests);
+
+      return res.status(200).json({
+        ok: true,
+        syncedToSheet,
+        request: toPublicRegistrationRequestView(consumed),
+        message: syncedToSheet
+          ? 'PIN Sekali Pakai berhasil dikonsumsi, dinonaktifkan permanen, dan statusnya diperbarui di Google Sheet.'
+          : 'PIN Sekali Pakai berhasil dikonsumsi dan dinonaktifkan permanen.',
+      });
+    }
+  );
+
   // 1a-1b. Metadata Statistik Sektoral (MS-Kegiatan & MS-Variabel — Satu Data Indonesia)
   const METADATA_FILE_PATH = path.resolve(
     __dirname,
@@ -1823,16 +2843,570 @@ async function startServer() {
     });
   });
 
-  // 1a-6. Node Interoperabilitas Standar Nasional: CKAN API v3 & W3C DCAT / JSON-SDI Feed (Read-Only, Khusus Dataset Terverifikasi & Publik)
+  // 1a-5b. Cloudflare DNS/SSL/WAF Pre-Flight Diagnostic & Blueprint Generator
+  app.get('/api/security/cloudflare-waf/preflight', (req, res) => {
+    if (!requireSuperAdminActor(req, res)) return;
+
+    const cfRay = typeof req.headers['cf-ray'] === 'string' ? req.headers['cf-ray'] : '';
+    const cfConnectingIp =
+      typeof req.headers['cf-connecting-ip'] === 'string'
+        ? req.headers['cf-connecting-ip']
+        : '';
+    const behindCloudflare = Boolean(cfRay && cfConnectingIp);
+    const hasOriginVerifySecret = Boolean(
+      activeCloudflareWafConfig.originVerifySecret
+    );
+    const turnstileConfigured = Boolean(
+      activeCloudflareWafConfig.turnstileEnabled &&
+        activeCloudflareWafConfig.turnstileSiteKey &&
+        activeCloudflareWafConfig.turnstileSecretKey
+    );
+    const cloudflareApiConfigured = Boolean(
+      process.env.CLOUDFLARE_API_TOKEN?.trim() &&
+        process.env.CLOUDFLARE_ZONE_ID?.trim()
+    );
+    const sovereignSheetCount = Object.keys(sovereignSheetsStore.sheets).length;
+    const sovereignRowCount = Object.values(
+      sovereignSheetsStore.rowsBySheet
+    ).reduce((acc, rows) => acc + rows.length, 0);
+
+    const domain = activeRegencyConfig.domainResmi || 'nagekeokab.go.id';
+    const portalSubdomain = domain.startsWith('data.')
+      ? domain
+      : `data.${domain}`;
+
+    const checks = [
+      {
+        id: 'app-waf',
+        title: 'App-Level WAF, CSP & Auto-Ban Middleware',
+        status: 'pass' as const,
+        detail:
+          'Middleware keamanan aktif di Node.js (deteksi SQLi/XSS, scanner blocker, honeypot, rate limit baca/tulis, CSP, HSTS).',
+      },
+      {
+        id: 'threat-score',
+        title: 'Pemblokiran CF-Threat-Score Otomatis',
+        status: activeCloudflareWafConfig.blockHighThreatScore
+          ? ('pass' as const)
+          : ('warn' as const),
+        detail: activeCloudflareWafConfig.blockHighThreatScore
+          ? `Aktif (menolak skor ancaman > ${activeCloudflareWafConfig.threatScoreThreshold}).`
+          : 'Nonaktif. Disarankan aktifkan untuk menyaring trafik botnet Cloudflare.',
+      },
+      {
+        id: 'origin-secret',
+        title: 'Secret Header Verifikasi Origin (X-CF-Origin-Verify)',
+        status: hasOriginVerifySecret ? ('pass' as const) : ('warn' as const),
+        detail: hasOriginVerifySecret
+          ? 'Token rahasia origin tersedia di server dan siap dipasang di Transform Rule Cloudflare.'
+          : 'Token origin belum dibuat.',
+      },
+      {
+        id: 'turnstile',
+        title: 'Cloudflare Turnstile Anti-Bot Login Admin',
+        status: turnstileConfigured ? ('pass' as const) : ('warn' as const),
+        detail: turnstileConfigured
+          ? 'Turnstile aktif dengan Site Key & Secret Key terverifikasi.'
+          : 'Opsional belum diaktifkan (brute-force lockout & honeypot server tetap aktif).',
+      },
+      {
+        id: 'cf-edge-live',
+        title: `Status Proxy DNS Cloudflare (${portalSubdomain})`,
+        status: behindCloudflare ? ('pass' as const) : ('pending' as const),
+        detail: behindCloudflare
+          ? `Trafik saat ini melewati Cloudflare Edge (CF-Ray: ${cfRay}).${
+              activeCloudflareWafConfig.strictOriginLock
+                ? ' Strict Origin Lock AKTIF.'
+                : ' Anda aman mengaktifkan Strict Origin Lock.'
+            }`
+          : `Belum melewati proxy Cloudflare (normal saat preview lokal). Saat rilis ke ${portalSubdomain}, arahkan DNS CNAME/A dengan status Proxied (Awan Oranye) lalu aktifkan Strict Origin Lock.`,
+      },
+      {
+        id: 'sovereign-store',
+        title: 'Sovereign Server Store & Katalog Publik Warga',
+        status: 'pass' as const,
+        detail: `Penyimpanan mandiri server siap (${sovereignSheetCount} tabel, ${sovereignRowCount} baris tersimpan) & ${publicHarvestCatalog.length} dataset tersedia di Etalase Publik.`,
+      },
+    ];
+
+    const passedWeight = checks.reduce((acc, c) => {
+      if (c.status === 'pass') return acc + 1;
+      if (c.status === 'warn') return acc + 0.5;
+      return acc + 0.25;
+    }, 0);
+    const readinessScore = Math.round((passedWeight / checks.length) * 100);
+
+    return res.json({
+      ok: true,
+      readinessScore,
+      domainResmi: domain,
+      recommendedHost: portalSubdomain,
+      cloudflareApiConfigured,
+      metrics: {
+        behindCloudflare,
+        strictOriginLock: activeCloudflareWafConfig.strictOriginLock,
+        hasOriginVerifySecret,
+        blockHighThreatScore: activeCloudflareWafConfig.blockHighThreatScore,
+        turnstileConfigured,
+        sovereignSheetCount,
+        sovereignRowCount,
+        publicCatalogCount: publicHarvestCatalog.length,
+      },
+      checks,
+      blueprint: {
+        dnsRecord: {
+          type: 'CNAME',
+          name: portalSubdomain,
+          target: req.get('host') || 'ORIGIN_SERVER_HOST',
+          proxied: true,
+          sslMode: 'Full (strict)',
+          minTlsVersion: '1.2',
+          alwaysUseHttps: true,
+        },
+        transformRule: {
+          name: `SatuData Inject Origin Verify (${portalSubdomain})`,
+          expression: `(http.host eq "${portalSubdomain}")`,
+          headerName: activeCloudflareWafConfig.originVerifyHeaderName,
+          headerValue: activeCloudflareWafConfig.originVerifySecret,
+        },
+        wafCustomRule: {
+          name: `SatuData Protect Admin & Block Scanners (${portalSubdomain})`,
+          expression: `(http.request.uri.path contains "/api/auth/superadmin" and cf.threat_score gt 10) or (http.request.uri.path in {"/.env" "/wp-admin" "/wp-login.php" "/phpmyadmin"})`,
+          action: 'managed_challenge',
+        },
+        rateLimitRule: {
+          name: `SatuData Login & API Write Guard (${portalSubdomain})`,
+          expression: `(http.request.uri.path contains "/api/auth/superadmin") or (http.request.method eq "POST" and http.request.uri.path contains "/api/sovereign-sheets")`,
+          requestsPerPeriod: 20,
+          periodSeconds: 60,
+          action: 'block',
+        },
+      },
+    });
+  });
+
+  app.post('/api/security/cloudflare-waf/apply-remote', async (req, res) => {
+    if (!requireSuperAdminActor(req, res)) return;
+    const token = process.env.CLOUDFLARE_API_TOKEN?.trim() || '';
+    const zoneId = process.env.CLOUDFLARE_ZONE_ID?.trim() || '';
+    if (!token || !zoneId) {
+      return res.status(400).json({
+        ok: false,
+        message:
+          'Variabel lingkungan server CLOUDFLARE_API_TOKEN dan CLOUDFLARE_ZONE_ID belum dikonfigurasi. Gunakan tombol Unduh Skrip Deploy DNS/WAF atau tambahkan kredensial di .env server produksi.',
+      });
+    }
+
+    try {
+      const domain = activeRegencyConfig.domainResmi || 'nagekeokab.go.id';
+      const portalSubdomain = domain.startsWith('data.')
+        ? domain
+        : `data.${domain}`;
+
+      const verifyRes = await fetch(
+        `https://api.cloudflare.com/client/v4/zones/${encodeURIComponent(
+          zoneId
+        )}`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+        }
+      );
+      const verifyJson = (await verifyRes.json()) as {
+        success?: boolean;
+        result?: { name?: string; status?: string };
+        errors?: Array<{ message?: string }>;
+      };
+      if (!verifyRes.ok || !verifyJson.success) {
+        return res.status(502).json({
+          ok: false,
+          message:
+            verifyJson.errors?.[0]?.message ||
+            'Gagal memverifikasi Zone Cloudflare melalui API.',
+        });
+      }
+
+      // Aktifkan SSL Full (Strict) & Always Use HTTPS pada zona Cloudflare
+      await fetch(
+        `https://api.cloudflare.com/client/v4/zones/${encodeURIComponent(
+          zoneId
+        )}/settings/ssl`,
+        {
+          method: 'PATCH',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ value: 'strict' }),
+        }
+      );
+      await fetch(
+        `https://api.cloudflare.com/client/v4/zones/${encodeURIComponent(
+          zoneId
+        )}/settings/always_use_https`,
+        {
+          method: 'PATCH',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ value: 'on' }),
+        }
+      );
+
+      return res.json({
+        ok: true,
+        zoneName: verifyJson.result?.name || domain,
+        zoneStatus: verifyJson.result?.status || 'active',
+        recommendedHost: portalSubdomain,
+        message: `Zona Cloudflare "${
+          verifyJson.result?.name || domain
+        }" terhubung. SSL Full (Strict) & Always Use HTTPS telah diterapkan otomatis.`,
+      });
+    } catch (err) {
+      return res.status(502).json({
+        ok: false,
+        message: `Gagal menghubungi API Cloudflare: ${
+          err instanceof Error ? err.message : 'Network error'
+        }`,
+      });
+    }
+  });
+
+  // 1a-5c. Server Sovereign Data Store (Menutup Ketergantungan Tunggal pada Google Sheets / Apps Script)
+  const SOVEREIGN_SHEETS_PATH = path.resolve(
+    __dirname,
+    'data',
+    'sovereign-sheets.json'
+  );
+
+  interface SovereignRowRecord {
+    _id: string;
+    _rowNumber?: number;
+    _updatedAt: string;
+    values: Record<string, string>;
+  }
+
+  interface SovereignSheetsStore {
+    sheets: Record<string, Record<string, unknown>>;
+    rowsBySheet: Record<string, SovereignRowRecord[]>;
+    updatedAt: string;
+  }
+
+  const loadSovereignSheetsStore = (): SovereignSheetsStore => {
+    try {
+      if (fs.existsSync(SOVEREIGN_SHEETS_PATH)) {
+        const parsed = JSON.parse(
+          fs.readFileSync(SOVEREIGN_SHEETS_PATH, 'utf8')
+        ) as Partial<SovereignSheetsStore>;
+        return {
+          sheets:
+            parsed.sheets && typeof parsed.sheets === 'object'
+              ? parsed.sheets
+              : {},
+          rowsBySheet:
+            parsed.rowsBySheet && typeof parsed.rowsBySheet === 'object'
+              ? parsed.rowsBySheet
+              : {},
+          updatedAt: String(parsed.updatedAt || ''),
+        };
+      }
+    } catch {
+      // Abaikan
+    }
+    return { sheets: {}, rowsBySheet: {}, updatedAt: '' };
+  };
+
+  const saveSovereignSheetsStore = (store: SovereignSheetsStore) => {
+    const next: SovereignSheetsStore = {
+      ...store,
+      updatedAt: new Date().toISOString(),
+    };
+    try {
+      const dir = path.dirname(SOVEREIGN_SHEETS_PATH);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(
+        SOVEREIGN_SHEETS_PATH,
+        JSON.stringify(next, null, 2),
+        'utf8'
+      );
+    } catch {
+      // Tetap aktif di memori
+    }
+    return next;
+  };
+
+  let sovereignSheetsStore: SovereignSheetsStore = loadSovereignSheetsStore();
+
+  const sanitizeRowValuesMap = (
+    rawValues: unknown
+  ): Record<string, string> => {
+    const out: Record<string, string> = {};
+    if (!rawValues || typeof rawValues !== 'object') return out;
+    for (const [k, v] of Object.entries(rawValues as Record<string, unknown>)) {
+      const key = String(k).trim().slice(0, 120);
+      if (!key) continue;
+      out[key] = String(v ?? '').slice(0, 4000);
+    }
+    return out;
+  };
+
+  app.get('/api/sovereign-sheets', (_req, res) => {
+    return res.json({
+      ok: true,
+      sheets: Object.values(sovereignSheetsStore.sheets),
+      rowsBySheet: sovereignSheetsStore.rowsBySheet,
+      updatedAt: sovereignSheetsStore.updatedAt,
+    });
+  });
+
+  app.post('/api/sovereign-sheets/register', (req, res) => {
+    const incoming = req.body?.sheet;
+    if (!incoming || typeof incoming !== 'object' || !incoming.id) {
+      return res.status(400).json({
+        ok: false,
+        message: 'Payload sheet wajib memiliki ID yang valid.',
+      });
+    }
+
+    const sheetId = String(incoming.id).trim();
+    const storageMode =
+      incoming.storageMode === 'server_standalone'
+        ? 'server_standalone'
+        : 'google_sheet';
+    const headers = Array.isArray(incoming.headers)
+      ? incoming.headers
+          .map((h: unknown) => String(h).trim())
+          .filter(Boolean)
+          .slice(0, 100)
+      : [];
+
+    const persistedSheet: Record<string, unknown> = {
+      ...incoming,
+      id: sheetId,
+      storageMode,
+      headers,
+      status:
+        storageMode === 'server_standalone'
+          ? 'Aktif'
+          : incoming.status || 'Menunggu Cangkok Script',
+      terakhirSinkron:
+        incoming.terakhirSinkron || new Date().toISOString(),
+    };
+
+    const initialRows = Array.isArray(req.body?.rows)
+      ? (req.body.rows as Array<Record<string, unknown>>)
+          .slice(0, 5000)
+          .map((r, idx) => ({
+            _id: String(r?._id || `${sheetId}-srv-${idx + 1}`),
+            _rowNumber: Number(r?._rowNumber || idx + 2),
+            _updatedAt: String(
+              r?._updatedAt || new Date().toISOString().slice(0, 10)
+            ),
+            values: sanitizeRowValuesMap(r?.values),
+          }))
+      : sovereignSheetsStore.rowsBySheet[sheetId] || [];
+
+    sovereignSheetsStore = saveSovereignSheetsStore({
+      sheets: {
+        ...sovereignSheetsStore.sheets,
+        [sheetId]: persistedSheet,
+      },
+      rowsBySheet: {
+        ...sovereignSheetsStore.rowsBySheet,
+        [sheetId]: initialRows,
+      },
+      updatedAt: sovereignSheetsStore.updatedAt,
+    });
+
+    return res.status(201).json({
+      ok: true,
+      sheet: persistedSheet,
+      rows: initialRows,
+      message:
+        storageMode === 'server_standalone'
+          ? 'Tabel Mandiri Server berhasil dibuat & aktif permanen tanpa ketergantungan Google Sheets.'
+          : 'Skema sheet OPD dicerminkan ke penyimpanan cadangan server.',
+    });
+  });
+
+  app.put('/api/sovereign-sheets/:sheetId/rows', (req, res) => {
+    const sheetId = String(req.params.sheetId || '').trim();
+    if (!sheetId) {
+      return res.status(400).json({ ok: false, message: 'ID sheet wajib diisi.' });
+    }
+
+    const headers = Array.isArray(req.body?.headers)
+      ? req.body.headers
+          .map((h: unknown) => String(h).trim())
+          .filter(Boolean)
+          .slice(0, 100)
+      : undefined;
+
+    const incomingRows = Array.isArray(req.body?.rows)
+      ? (req.body.rows as Array<Record<string, unknown>>)
+          .slice(0, 5000)
+          .map((r, idx) => ({
+            _id: String(r?._id || `${sheetId}-srv-${idx + 1}`),
+            _rowNumber: Number(r?._rowNumber || idx + 2),
+            _updatedAt: String(
+              r?._updatedAt || new Date().toISOString().slice(0, 10)
+            ),
+            values: sanitizeRowValuesMap(r?.values),
+          }))
+      : [];
+
+    const existingSheet = sovereignSheetsStore.sheets[sheetId] || { id: sheetId };
+    const nextSheet = {
+      ...existingSheet,
+      ...(headers && headers.length > 0 ? { headers } : {}),
+      terakhirSinkron: new Date().toISOString(),
+    };
+
+    sovereignSheetsStore = saveSovereignSheetsStore({
+      sheets: {
+        ...sovereignSheetsStore.sheets,
+        [sheetId]: nextSheet,
+      },
+      rowsBySheet: {
+        ...sovereignSheetsStore.rowsBySheet,
+        [sheetId]: incomingRows,
+      },
+      updatedAt: sovereignSheetsStore.updatedAt,
+    });
+
+    return res.json({
+      ok: true,
+      rowCount: incomingRows.length,
+      syncedAt: nextSheet.terakhirSinkron,
+    });
+  });
+
+  app.post('/api/sovereign-sheets/:sheetId/mutate', (req, res) => {
+    const sheetId = String(req.params.sheetId || '').trim();
+    const action = String(req.body?.action || '').trim();
+    const row = req.body?.row as Record<string, unknown> | undefined;
+
+    if (!sheetId || !['create', 'update', 'delete'].includes(action) || !row) {
+      return res.status(400).json({
+        ok: false,
+        message: 'Permintaan mutasi Server Sovereign Store tidak lengkap.',
+      });
+    }
+
+    const currentRows = [...(sovereignSheetsStore.rowsBySheet[sheetId] || [])];
+    const rowId = String(row._id || `${sheetId}-srv-${Date.now().toString(36)}`);
+    const nowDate = new Date().toISOString().slice(0, 10);
+    let assignedRowNumber = Number(row._rowNumber || currentRows.length + 2);
+
+    let nextRows: SovereignRowRecord[] = currentRows;
+    if (action === 'create') {
+      assignedRowNumber = currentRows.length + 2;
+      nextRows = [
+        {
+          _id: rowId,
+          _rowNumber: assignedRowNumber,
+          _updatedAt: nowDate,
+          values: sanitizeRowValuesMap(row.values),
+        },
+        ...currentRows,
+      ];
+    } else if (action === 'update') {
+      const idx = currentRows.findIndex((r) => r._id === rowId);
+      const updatedRecord: SovereignRowRecord = {
+        _id: rowId,
+        _rowNumber: assignedRowNumber,
+        _updatedAt: nowDate,
+        values: sanitizeRowValuesMap(row.values),
+      };
+      if (idx >= 0) {
+        nextRows = currentRows.map((r, i) => (i === idx ? updatedRecord : r));
+      } else {
+        nextRows = [updatedRecord, ...currentRows];
+      }
+    } else if (action === 'delete') {
+      nextRows = currentRows.filter((r) => r._id !== rowId);
+    }
+
+    const existingSheet = sovereignSheetsStore.sheets[sheetId];
+    const nextSheets = existingSheet
+      ? {
+          ...sovereignSheetsStore.sheets,
+          [sheetId]: {
+            ...existingSheet,
+            terakhirSinkron: new Date().toISOString(),
+          },
+        }
+      : sovereignSheetsStore.sheets;
+
+    sovereignSheetsStore = saveSovereignSheetsStore({
+      sheets: nextSheets,
+      rowsBySheet: {
+        ...sovereignSheetsStore.rowsBySheet,
+        [sheetId]: nextRows,
+      },
+      updatedAt: sovereignSheetsStore.updatedAt,
+    });
+
+    return res.json({
+      ok: true,
+      rowNumber: assignedRowNumber,
+      totalRows: nextRows.length,
+      message:
+        action === 'delete'
+          ? 'Baris berhasil dihapus dari Penyimpanan Mandiri Server.'
+          : action === 'update'
+          ? 'Perubahan baris berhasil disimpan di Penyimpanan Mandiri Server.'
+          : 'Baris baru berhasil disimpan permanen di Penyimpanan Mandiri Server.',
+    });
+  });
+
+  app.delete('/api/sovereign-sheets/:sheetId', (req, res) => {
+    const sheetId = String(req.params.sheetId || '').trim();
+    if (!sheetId) {
+      return res.status(400).json({ ok: false, message: 'ID sheet wajib diisi.' });
+    }
+    const nextSheets = { ...sovereignSheetsStore.sheets };
+    const nextRows = { ...sovereignSheetsStore.rowsBySheet };
+    delete nextSheets[sheetId];
+    delete nextRows[sheetId];
+    sovereignSheetsStore = saveSovereignSheetsStore({
+      sheets: nextSheets,
+      rowsBySheet: nextRows,
+      updatedAt: sovereignSheetsStore.updatedAt,
+    });
+    return res.json({ ok: true, message: 'Dataset dihapus dari Server Store.' });
+  });
+
+  // 1a-6. Node Interoperabilitas Standar Nasional: CKAN API v3, W3C DCAT-AP & Etalase Pencarian Publik Warga (Zero PII)
   const PUBLIC_CATALOG_PATH = path.resolve(
     __dirname,
     'data',
     'public-catalog.json'
   );
 
+  const PUBLIC_PII_COLUMN_REGEX =
+    /(nik|ktp|no[._\s-]*hp|telepon|whatsapp|alamat|tgl[._\s-]*lahir|tanggal[._\s-]*lahir|email|rekening|npwp)/i;
+
+  interface PublicCatalogVariableItem {
+    namaKolom: string;
+    definisi: string;
+    tipeData: string;
+    satuan: string;
+  }
+
+  interface PublicCatalogPreviewRow {
+    _id: string;
+    _updatedAt: string;
+    values: Record<string, string>;
+  }
+
   interface PublicCatalogDatasetItem {
     id: string;
     slug: string;
+    sourceType: 'opd_verified' | 'kominfo_clone';
     judulDataset: string;
     deskripsi: string;
     produsenData: string;
@@ -1842,9 +3416,12 @@ async function startServer() {
     tahunData: string;
     frekuensiPemutakhiran: string;
     cakupanWilayah: string;
+    metodologiPengumpulan: string;
     satuanPengukuran: string;
     kontakPic: string;
     headers: string[];
+    variabel: PublicCatalogVariableItem[];
+    previewRows: PublicCatalogPreviewRow[];
     jumlahBaris: number;
     diperbaruiPada: string;
   }
@@ -1877,10 +3454,50 @@ async function startServer() {
 
   let publicHarvestCatalog: PublicCatalogDatasetItem[] = loadPublicCatalog();
 
+  const sanitizePublicHeadersAndRows = (
+    rawHeaders: unknown[],
+    rawRows: unknown[]
+  ): {
+    safeHeaders: string[];
+    safeRows: PublicCatalogPreviewRow[];
+    strippedColumns: string[];
+  } => {
+    const allHeaders = rawHeaders.map((h) => String(h).trim()).filter(Boolean);
+    const safeHeaders = allHeaders.filter((h) => !PUBLIC_PII_COLUMN_REGEX.test(h));
+    const strippedColumns = allHeaders.filter((h) =>
+      PUBLIC_PII_COLUMN_REGEX.test(h)
+    );
+
+    const safeRows: PublicCatalogPreviewRow[] = rawRows
+      .slice(0, 500)
+      .map((r, idx) => {
+        const rowObj = (r && typeof r === 'object' ? r : {}) as {
+          _id?: unknown;
+          _updatedAt?: unknown;
+          values?: Record<string, unknown>;
+        };
+        const cleanValues: Record<string, string> = {};
+        for (const h of safeHeaders) {
+          cleanValues[h] = String(rowObj.values?.[h] ?? '').slice(0, 500);
+        }
+        return {
+          _id: String(rowObj._id || `pub-r-${idx + 1}`),
+          _updatedAt: String(
+            rowObj._updatedAt || new Date().toISOString().slice(0, 10)
+          ),
+          values: cleanValues,
+        };
+      });
+
+    return { safeHeaders, safeRows, strippedColumns };
+  };
+
   app.post('/api/public/catalog/sync', (req, res) => {
     if (!requireSuperAdminActor(req, res)) return;
     const rawSheets = Array.isArray(req.body?.datasets) ? req.body.datasets : [];
+    const rawClones = Array.isArray(req.body?.clones) ? req.body.clones : [];
     const verifiedPublic: PublicCatalogDatasetItem[] = [];
+    let totalStrippedPiiCols = 0;
 
     for (const item of rawSheets) {
       const id = String(item?.id || '').trim();
@@ -1892,7 +3509,7 @@ async function startServer() {
       const tingkatAkses = String(
         meta?.tingkatAkses || item?.tingkatAkses || ''
       );
-      // Hanya dataset yang sudah Terverifikasi Walidata dan berstatus Terbuka (Publik) yang masuk ke feed harvesting!
+      // Hanya dataset yang sudah Terverifikasi Walidata dan berstatus Terbuka (Publik) yang masuk ke etalase & feed harvesting!
       if (
         statusValidasi !== 'Terverifikasi Walidata' ||
         tingkatAkses !== 'Terbuka (Publik)'
@@ -1901,15 +3518,41 @@ async function startServer() {
       }
 
       const judul = String(item?.judulDataset || '').trim();
-      const slug =
+      const slugBase =
         judul
           .toLowerCase()
           .replace(/[^a-z0-9]+/g, '-')
           .replace(/^-+|-+$/g, '') || id.toLowerCase();
 
+      const rawHeaders = Array.isArray(item?.headers) ? item.headers : [];
+      const fallbackSovereignRows = sovereignSheetsStore.rowsBySheet[id] || [];
+      const rawRows = Array.isArray(item?.previewRows)
+        ? item.previewRows
+        : fallbackSovereignRows;
+
+      const { safeHeaders, safeRows, strippedColumns } =
+        sanitizePublicHeadersAndRows(rawHeaders, rawRows);
+      totalStrippedPiiCols += strippedColumns.length;
+
+      const rawVars = Array.isArray(meta?.variabel)
+        ? (meta.variabel as Array<Record<string, unknown>>)
+        : Array.isArray(item?.variabel)
+        ? (item.variabel as Array<Record<string, unknown>>)
+        : [];
+      const safeSet = new Set(safeHeaders);
+      const safeVariables: PublicCatalogVariableItem[] = rawVars
+        .filter((v) => safeSet.has(String(v?.namaKolom || '').trim()))
+        .map((v) => ({
+          namaKolom: String(v?.namaKolom ?? '').trim(),
+          definisi: String(v?.definisi ?? '').trim(),
+          tipeData: String(v?.tipeData ?? 'Teks').trim(),
+          satuan: String(v?.satuan ?? '').trim(),
+        }));
+
       verifiedPublic.push({
         id,
-        slug: `${slug}-${id.slice(-4).toLowerCase()}`,
+        slug: `${slugBase}-${id.slice(-4).toLowerCase()}`,
+        sourceType: 'opd_verified',
         judulDataset: judul,
         deskripsi: String(
           meta?.konsepDefinisi || item?.deskripsi || ''
@@ -1929,14 +3572,66 @@ async function startServer() {
           meta?.frekuensiPemutakhiran || 'Tahunan'
         ).trim(),
         cakupanWilayah: String(meta?.cakupanWilayah || 'Kabupaten').trim(),
+        metodologiPengumpulan: String(
+          meta?.metodologiPengumpulan || 'Kompilasi Administrasi'
+        ).trim(),
         satuanPengukuran: String(meta?.satuanPengukuran || '').trim(),
         kontakPic: String(meta?.kontakPic || '').trim(),
-        headers: Array.isArray(item?.headers)
-          ? item.headers.map((h: unknown) => String(h))
-          : [],
-        jumlahBaris: Number(item?.jumlahBaris || 0),
+        headers: safeHeaders,
+        variabel: safeVariables,
+        previewRows: safeRows,
+        jumlahBaris: Math.max(Number(item?.jumlahBaris || 0), safeRows.length),
         diperbaruiPada: String(
           meta?.diperbaruiPada || new Date().toISOString()
+        ),
+      });
+    }
+
+    // Sertakan hasil Publikasi Kominfo yang berstatus "Dipublikasikan" (otomatis strip PII)
+    for (const clone of rawClones) {
+      if (String(clone?.statusPublikasi || '') !== 'Dipublikasikan') continue;
+      const cid = String(clone?.id || '').trim();
+      if (!cid) continue;
+      const judul = String(clone?.judulPublikasi || '').trim();
+      const slugBase =
+        judul
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-+|-+$/g, '') || cid.toLowerCase();
+
+      const rawHeaders = Array.isArray(clone?.selectedHeaders)
+        ? clone.selectedHeaders
+        : [];
+      const rawRows = Array.isArray(clone?.rows) ? clone.rows : [];
+      const { safeHeaders, safeRows, strippedColumns } =
+        sanitizePublicHeadersAndRows(rawHeaders, rawRows);
+      totalStrippedPiiCols += strippedColumns.length;
+
+      verifiedPublic.push({
+        id: cid,
+        slug: `pub-${slugBase}-${cid.slice(-4).toLowerCase()}`,
+        sourceType: 'kominfo_clone',
+        judulDataset: judul,
+        deskripsi: String(clone?.ringkasan || '').trim(),
+        produsenData: String(clone?.sourceOpdNama || '').trim(),
+        walidata: activeRegencyConfig.namaWalidata,
+        urusanPemerintahan: String(clone?.kategori || 'Publikasi Sektoral').trim(),
+        kodeReferensi: `PUB-${cid.slice(-6).toUpperCase()}`,
+        tahunData: String(
+          String(clone?.dipublikasikanPada || '').slice(0, 4) ||
+            new Date().getFullYear()
+        ),
+        frekuensiPemutakhiran: 'Tahunan',
+        cakupanWilayah: 'Kabupaten',
+        metodologiPengumpulan: 'Kurasi Walidata Kominfo',
+        satuanPengukuran: '',
+        kontakPic: activeRegencyConfig.namaWalidata,
+        headers: safeHeaders,
+        variabel: [],
+        previewRows: safeRows,
+        jumlahBaris: Math.max(rawRows.length, safeRows.length),
+        diperbaruiPada: String(
+          clone?.dipublikasikanPada || new Date().toISOString()
         ),
       });
     }
@@ -1947,7 +3642,104 @@ async function startServer() {
     return res.json({
       ok: true,
       publishedCount: publicHarvestCatalog.length,
-      message: `${publicHarvestCatalog.length} dataset Terverifikasi & Publik berhasil disinkronkan ke endpoint harvesting CKAN/DCAT.`,
+      strippedPiiCols: totalStrippedPiiCols,
+      message: `${publicHarvestCatalog.length} dataset Terverifikasi & Publik berhasil disinkronkan ke Etalase Publik Warga & endpoint CKAN/DCAT${
+        totalStrippedPiiCols > 0
+          ? ` (${totalStrippedPiiCols} kolom sensitif PII disaring otomatis).`
+          : ' (zero PII).'
+      }`,
+    });
+  });
+
+  // Etalase Pencarian Publik untuk Warga Umum (Read-Only, Tanpa Login, Zero PII)
+  app.get('/api/public/catalog', (req, res) => {
+    const q = String(req.query?.q || '').trim().toLowerCase();
+    const opd = String(req.query?.opd || '').trim().toLowerCase();
+    const urusan = String(req.query?.urusan || '').trim().toLowerCase();
+    const tahun = String(req.query?.tahun || '').trim();
+
+    const opdList = Array.from(
+      new Set(publicHarvestCatalog.map((d) => d.produsenData).filter(Boolean))
+    ).sort();
+    const urusanList = Array.from(
+      new Set(
+        publicHarvestCatalog.map((d) => d.urusanPemerintahan).filter(Boolean)
+      )
+    ).sort();
+    const tahunList = Array.from(
+      new Set(publicHarvestCatalog.map((d) => d.tahunData).filter(Boolean))
+    ).sort((a, b) => b.localeCompare(a));
+
+    const filtered = publicHarvestCatalog.filter((d) => {
+      if (opd && d.produsenData.toLowerCase() !== opd) return false;
+      if (urusan && d.urusanPemerintahan.toLowerCase() !== urusan) return false;
+      if (tahun && d.tahunData !== tahun) return false;
+      if (q) {
+        const hay = [
+          d.judulDataset,
+          d.deskripsi,
+          d.produsenData,
+          d.urusanPemerintahan,
+          d.kodeReferensi,
+          ...d.headers,
+        ]
+          .join(' ')
+          .toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+
+    res.setHeader('Cache-Control', 'public, max-age=60');
+    return res.json({
+      ok: true,
+      portalName: activeRegencyConfig.namaPortal,
+      regencyName: activeRegencyConfig.namaKabupaten,
+      walidataName: activeRegencyConfig.namaWalidata,
+      totalDatasets: publicHarvestCatalog.length,
+      facets: { opdList, urusanList, tahunList },
+      datasets: filtered.map((d) => ({
+        id: d.id,
+        slug: d.slug,
+        sourceType: d.sourceType,
+        judulDataset: d.judulDataset,
+        deskripsi: d.deskripsi,
+        produsenData: d.produsenData,
+        walidata: d.walidata,
+        urusanPemerintahan: d.urusanPemerintahan,
+        kodeReferensi: d.kodeReferensi,
+        tahunData: d.tahunData,
+        frekuensiPemutakhiran: d.frekuensiPemutakhiran,
+        cakupanWilayah: d.cakupanWilayah,
+        metodologiPengumpulan: d.metodologiPengumpulan,
+        satuanPengukuran: d.satuanPengukuran,
+        kontakPic: d.kontakPic,
+        headers: d.headers,
+        variabel: d.variabel,
+        jumlahBaris: d.jumlahBaris,
+        diperbaruiPada: d.diperbaruiPada,
+      })),
+    });
+  });
+
+  app.get('/api/public/catalog/:slug', (req, res) => {
+    const idOrSlug = String(req.params.slug || '').trim().toLowerCase();
+    const found = publicHarvestCatalog.find(
+      (d) =>
+        d.slug.toLowerCase() === idOrSlug ||
+        d.id.toLowerCase() === idOrSlug ||
+        d.kodeReferensi.toLowerCase() === idOrSlug
+    );
+    if (!found) {
+      return res.status(404).json({
+        ok: false,
+        message: 'Dataset tidak ditemukan di katalog publik terverifikasi.',
+      });
+    }
+    res.setHeader('Cache-Control', 'public, max-age=60');
+    return res.json({
+      ok: true,
+      dataset: found,
     });
   });
 
@@ -1990,6 +3782,14 @@ async function startServer() {
             mediaType: 'application/json',
             format: 'CKAN-JSON',
             accessURL: `${baseUrl}/api/public/ckan/package_show?id=${encodeURIComponent(
+              d.slug
+            )}`,
+          },
+          {
+            '@type': 'dcat:Distribution',
+            mediaType: 'application/json',
+            format: 'JSON-SDI-TABLE',
+            accessURL: `${baseUrl}/api/public/catalog/${encodeURIComponent(
               d.slug
             )}`,
           },

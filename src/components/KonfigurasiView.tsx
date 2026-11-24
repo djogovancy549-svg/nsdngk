@@ -1,18 +1,23 @@
 import React, { useEffect, useState } from 'react';
 import {
+  AlertTriangle,
   Building2,
   Check,
   CheckCircle2,
+  Clock,
   Cloud,
   Copy,
   Database,
+  Download,
   ExternalLink,
+  FileJson,
   Globe,
   KeyRound,
   Lock,
   RefreshCw,
   Save,
   ShieldCheck,
+  Terminal,
   Trash2,
   Wrench,
   Zap,
@@ -23,7 +28,9 @@ import {
   isPlaceholderEndpoint,
 } from '../config/opdSheets';
 import {
+  fetchAuthSheetConfigFromServer,
   getActiveAuthSheetConfig,
+  saveAuthSheetConfigToServer,
   saveCustomAuthSheetConfig,
   testAuthSheetConnection,
 } from '../services/authSheetService';
@@ -44,8 +51,13 @@ import {
   pushOpdSheetToBigQuery,
 } from '../services/bigQueryService';
 import {
+  applyCloudflareRemoteSettings,
+  CloudflarePreflightResult,
   CloudflareWafStatusResponse,
+  downloadCloudflareBundleJson,
+  downloadCloudflareSetupScript,
   evaluateSheetCapacity,
+  fetchCloudflarePreflight,
   fetchCloudflareWafStatus,
   rotateCloudflareOriginSecret,
   syncPublicHarvestCatalog,
@@ -55,6 +67,7 @@ import {
   DatasetMetadata,
   DynamicSheetRow,
   OpdDynamicSheet,
+  PublishedDatasetClone,
 } from '../types/satuData';
 
 interface KonfigurasiViewProps {
@@ -63,6 +76,7 @@ interface KonfigurasiViewProps {
   sheets: OpdDynamicSheet[];
   rowsBySheet: Record<string, DynamicSheetRow[]>;
   metadataBySheet: Record<string, DatasetMetadata>;
+  publishedClones: PublishedDatasetClone[];
   onRegencyConfigUpdated: (next: RegencyWhiteLabelConfig) => void;
 }
 
@@ -72,6 +86,7 @@ export function KonfigurasiView({
   sheets,
   rowsBySheet,
   metadataBySheet,
+  publishedClones,
   onRegencyConfigUpdated,
 }: KonfigurasiViewProps) {
   // White-Label Multi-Kabupaten state
@@ -100,6 +115,9 @@ export function KonfigurasiView({
 
   // Cloudflare WAF & Edge Security state
   const [cfWaf, setCfWaf] = useState<CloudflareWafStatusResponse | null>(null);
+  const [cfPreflight, setCfPreflight] =
+    useState<CloudflarePreflightResult | null>(null);
+  const [cfRemoteApplying, setCfRemoteApplying] = useState(false);
   const [cfLoading, setCfLoading] = useState(false);
   const [cfStrictOrigin, setCfStrictOrigin] = useState(false);
   const [cfBlockThreatScore, setCfBlockThreatScore] = useState(true);
@@ -137,7 +155,10 @@ export function KonfigurasiView({
   const loadCfWafStatus = async () => {
     setCfLoading(true);
     try {
-      const res = await fetchCloudflareWafStatus(currentSuperAdminEmail);
+      const [res, preflightRes] = await Promise.all([
+        fetchCloudflareWafStatus(currentSuperAdminEmail),
+        fetchCloudflarePreflight(currentSuperAdminEmail),
+      ]);
       if (res) {
         setCfWaf(res);
         setCfStrictOrigin(res.config.strictOriginLock);
@@ -145,6 +166,9 @@ export function KonfigurasiView({
         setCfThreatThreshold(res.config.threatScoreThreshold);
         setCfTurnstileEnabled(res.config.turnstileEnabled);
         setCfTurnstileSiteKey(res.config.turnstileSiteKey);
+      }
+      if (preflightRes) {
+        setCfPreflight(preflightRes);
       }
     } finally {
       setCfLoading(false);
@@ -181,6 +205,17 @@ export function KonfigurasiView({
     loadProxyStats();
     loadBqStatus();
     loadCfWafStatus();
+    fetchAuthSheetConfigFromServer(currentSuperAdminEmail).then((res) => {
+      if (!res.ok || !res.config) return;
+      if (res.configured && res.config.webhookUrl) {
+        setSheetUrl(
+          isPlaceholderEndpoint(res.config.sheetUrl) ? '' : res.config.sheetUrl
+        );
+        setSheetName(res.config.sheetName || 'Akun_OPD');
+        setWebhookUrl(res.config.webhookUrl);
+        setSavedCfg(getActiveAuthSheetConfig());
+      }
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentSuperAdminEmail]);
 
@@ -222,6 +257,21 @@ export function KonfigurasiView({
     }
   };
 
+  const handleApplyCloudflareRemote = async () => {
+    setCfFeedback(null);
+    setCfRemoteApplying(true);
+    try {
+      const res = await applyCloudflareRemoteSettings(currentSuperAdminEmail);
+      setCfFeedback({
+        type: res.ok ? 'success' : 'error',
+        text: res.message,
+      });
+      await loadCfWafStatus();
+    } finally {
+      setCfRemoteApplying(false);
+    }
+  };
+
   const handleSyncCatalogFeed = async () => {
     setCatalogMessage(null);
     setCatalogSyncing(true);
@@ -230,9 +280,11 @@ export function KonfigurasiView({
         currentSuperAdminEmail,
         sheets,
         rowsBySheet,
-        metadataBySheet
+        metadataBySheet,
+        publishedClones
       );
       setCatalogMessage(res.message);
+      await loadCfWafStatus();
     } finally {
       setCatalogSyncing(false);
     }
@@ -374,6 +426,7 @@ export function KonfigurasiView({
     type: 'success' | 'error';
     text: string;
   } | null>(null);
+  const [savingAuthSheet, setSavingAuthSheet] = useState(false);
   const [testing, setTesting] = useState(false);
   const [pingResult, setPingResult] = useState<{
     ok: boolean;
@@ -400,7 +453,7 @@ export function KonfigurasiView({
     }
   };
 
-  const handleSaveAuthSheet = (e: React.FormEvent) => {
+  const handleSaveAuthSheet = async (e: React.FormEvent) => {
     e.preventDefault();
     setSaveMessage(null);
     setPingResult(null);
@@ -421,7 +474,7 @@ export function KonfigurasiView({
       return;
     }
 
-    if (!webhookUrl.trim().startsWith('https://script.google.com/')) {
+    if (!webhookUrl.trim().startsWith('https://script.google.com/macros/s/')) {
       setSaveMessage({
         type: 'error',
         text: 'URL Webhook harus berupa URL Google Apps Script Web App (https://script.google.com/macros/s/.../exec).',
@@ -429,16 +482,38 @@ export function KonfigurasiView({
       return;
     }
 
-    const updated = saveCustomAuthSheetConfig({
-      sheetUrl,
-      sheetName,
-      webhookUrl,
-    });
-    setSavedCfg(updated);
-    setSaveMessage({
-      type: 'success',
-      text: 'Konfigurasi Google Sheet Akun OPD berhasil disimpan. Seluruh pendaftaran dan sinkronisasi akun kini terhubung ke Sheet Super Admin Anda.',
-    });
+    setSavingAuthSheet(true);
+    try {
+      const updated = saveCustomAuthSheetConfig({
+        sheetUrl,
+        sheetName,
+        webhookUrl,
+      });
+      setSavedCfg(updated);
+
+      const serverRes = await saveAuthSheetConfigToServer(
+        currentSuperAdminEmail,
+        {
+          sheetUrl: updated.sheetUrl,
+          sheetName: updated.sheetName,
+          webhookUrl: updated.webhookUrl,
+        }
+      );
+
+      if (serverRes.ok) {
+        setSaveMessage({
+          type: 'success',
+          text: serverRes.message,
+        });
+      } else {
+        setSaveMessage({
+          type: 'error',
+          text: `Tersimpan di browser, tetapi gagal sinkron ke server: ${serverRes.message}`,
+        });
+      }
+    } finally {
+      setSavingAuthSheet(false);
+    }
   };
 
   const handleTestConnection = async () => {
@@ -1117,10 +1192,92 @@ export function KonfigurasiView({
               </p>
             </div>
           </div>
+
+          {/* Pre-Flight Readiness & Paket Rilis DNS/WAF Cloudflare */}
+          {cfPreflight && (
+            <div className="p-4 bg-slate-50 border border-slate-200 rounded-md space-y-4">
+              <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+                <div>
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="font-semibold text-slate-900">
+                      Pre-Flight Kesiapan Rilis DNS &amp; WAF (
+                      <code className="font-mono text-teal-700">
+                        {cfPreflight.recommendedHost}
+                      </code>
+                      )
+                    </span>
+                    <span className="px-2 py-0.5 text-[11px] font-mono font-semibold bg-[#0B1B2B] text-white rounded">
+                      Skor Kesiapan: {cfPreflight.readinessScore}%
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-500 mt-0.5">
+                    Cek otomatis kesiapan edge, paket DNS Record CNAME Proxied,
+                    SSL Full (Strict), dan skrip CLI siap pakai saat domain resmi
+                    kabupaten dirilis.
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => downloadCloudflareSetupScript(cfPreflight)}
+                    className="inline-flex items-center gap-1.5 h-8 px-3 text-xs font-semibold text-white bg-[#0B1B2B] rounded hover:bg-slate-800"
+                  >
+                    <Terminal className="w-3.5 h-3.5 text-teal-400" />
+                    Unduh Skrip Deploy (.sh)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => downloadCloudflareBundleJson(cfPreflight)}
+                    className="inline-flex items-center gap-1.5 h-8 px-3 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded hover:bg-slate-100"
+                  >
+                    <FileJson className="w-3.5 h-3.5" />
+                    Blueprint JSON
+                  </button>
+                  {cfPreflight.cloudflareApiConfigured && (
+                    <button
+                      type="button"
+                      disabled={cfRemoteApplying}
+                      onClick={handleApplyCloudflareRemote}
+                      className="inline-flex items-center gap-1.5 h-8 px-3 text-xs font-semibold text-white bg-teal-700 rounded hover:bg-teal-800 disabled:opacity-60"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      {cfRemoteApplying
+                        ? 'Menerapkan...'
+                        : 'Terapkan SSL Strict via Server'}
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2.5">
+                {cfPreflight.checks.map((chk) => (
+                  <div
+                    key={chk.id}
+                    className="p-3 bg-white border border-slate-200 rounded text-xs space-y-1"
+                  >
+                    <div className="flex items-center gap-1.5 font-semibold text-slate-900">
+                      {chk.status === 'pass' ? (
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                      ) : chk.status === 'warn' ? (
+                        <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                      ) : (
+                        <Clock className="w-3.5 h-3.5 text-sky-600 shrink-0" />
+                      )}
+                      <span className="truncate">{chk.title}</span>
+                    </div>
+                    <p className="text-[11px] text-slate-600 leading-relaxed">
+                      {chk.detail}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       </section>
 
-      {/* SECTION B3: NODE INTEROPERABILITAS NASIONAL (CKAN API v3 & W3C DCAT-AP) */}
+      {/* SECTION B3: NODE INTEROPERABILITAS NASIONAL & ETALASE PUBLIK (CKAN API v3 & W3C DCAT-AP) */}
       <section className="bg-white border border-slate-200 rounded-lg overflow-hidden">
         <div className="px-6 py-4 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div className="flex items-start gap-2.5">
@@ -1129,14 +1286,15 @@ export function KonfigurasiView({
             </div>
             <div>
               <h2 className="text-base font-semibold text-slate-900">
-                Node Interoperabilitas Satu Data Indonesia (CKAN API &amp;
-                DCAT.json)
+                Etalase Pencarian Publik Warga &amp; Node Interoperabilitas
+                (CKAN / DCAT.json)
               </h2>
               <p className="text-xs text-slate-500 mt-0.5">
-                Menutup celah integrasi dengan portal publik atau harvester
-                nasional. Hanya dataset dengan status metadata{' '}
-                <strong>Terverifikasi Walidata</strong> dan tingkat akses{' '}
-                <strong>Terbuka (Publik)</strong> yang diekspos (zero PII).
+                Menyinkronkan dataset berstatus{' '}
+                <strong>Terverifikasi Walidata</strong> +{' '}
+                <strong>Terbuka (Publik)</strong> serta Publikasi Kominfo ke
+                menu <strong>Katalog Publik</strong> (tanpa login) dan feed SDI
+                nasional (kolom PII disaring otomatis di server).
               </p>
             </div>
           </div>
@@ -1152,7 +1310,7 @@ export function KonfigurasiView({
             />
             {catalogSyncing
               ? 'Menyinkronkan Feed...'
-              : 'Sinkronkan Feed Publik Terverifikasi'}
+              : 'Sinkronkan Etalase & Feed Publik'}
           </button>
         </div>
 
@@ -1163,8 +1321,13 @@ export function KonfigurasiView({
             </div>
           )}
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
             {[
+              {
+                id: 'ep-public-catalog',
+                label: 'API Etalase Pencarian Warga',
+                path: '/api/public/catalog',
+              },
               {
                 id: 'ep-dcat',
                 label: 'W3C DCAT / JSON-SDI Feed',
@@ -1518,7 +1681,7 @@ export function KonfigurasiView({
               <span className="text-slate-500">Milik Super Admin Walidata</span>
             </div>
             <h2 className="text-base font-semibold text-slate-900 mt-0.5">
-              Daftarkan Google Sheet Daftar Akun OPD
+              Daftarkan Google Sheet Daftar Akun OPD &amp; PIN Sekali Pakai
             </h2>
           </div>
 
@@ -1546,7 +1709,10 @@ export function KonfigurasiView({
               <span className="font-medium text-slate-800">
                 Master_Akun_OPD_Nagekeo
               </span>
-              ).
+              ). Skrip otomatis membuat tab{' '}
+              <code className="font-mono text-slate-800">Akun_OPD</code> dan{' '}
+              <code className="font-mono text-slate-800">Permohonan_PIN_OPD</code>
+              .
             </p>
           </div>
           <div>
@@ -1556,7 +1722,7 @@ export function KonfigurasiView({
             <p className="mt-0.5 leading-relaxed">
               Buka <strong>Extensions → Apps Script</strong>, salin skrip{' '}
               <code className="font-mono text-slate-800">Code_Akun_OPD.gs</code>{' '}
-              di bawah, lalu simpan.
+              versi terbaru di bawah, lalu simpan.
             </p>
           </div>
           <div>
@@ -1565,8 +1731,8 @@ export function KonfigurasiView({
             </p>
             <p className="mt-0.5 leading-relaxed">
               Klik <strong>Deploy → New Deployment → Web App</strong> (Execute
-              as: <em>Me</em>, Access: <em>Anyone</em>), salin URL{' '}
-              <code className="font-mono text-slate-800">/exec</code>.
+              as: <em>Me</em>, Access: <em>Anyone</em>). Jika memperbarui skrip
+              lama, wajib buat deployment baru atau kelola versi terbaru.
             </p>
           </div>
           <div>
@@ -1575,7 +1741,8 @@ export function KonfigurasiView({
             </p>
             <p className="mt-0.5 leading-relaxed">
               Masukkan URL Sheet &amp; URL Web App di form bawah lalu klik{' '}
-              <strong>Simpan &amp; Uji Koneksi</strong>.
+              <strong>Simpan Konfigurasi</strong> agar permohonan &amp; PIN
+              otomatis tercatat di Google Sheet.
             </p>
           </div>
         </div>
@@ -1676,10 +1843,13 @@ export function KonfigurasiView({
 
             <button
               type="submit"
-              className="inline-flex items-center gap-1.5 h-10 px-5 text-xs font-semibold text-white bg-[#0B1B2B] rounded-md hover:bg-slate-800 transition-colors whitespace-nowrap"
+              disabled={savingAuthSheet}
+              className="inline-flex items-center gap-1.5 h-10 px-5 text-xs font-semibold text-white bg-[#0B1B2B] rounded-md hover:bg-slate-800 transition-colors whitespace-nowrap disabled:opacity-60"
             >
               <Save className="w-3.5 h-3.5" />
-              Simpan Konfigurasi Sheet Akun
+              {savingAuthSheet
+                ? 'Menyimpan ke Server...'
+                : 'Simpan Konfigurasi Sheet Akun'}
             </button>
           </div>
         </form>
@@ -1695,9 +1865,13 @@ export function KonfigurasiView({
             <p className="text-xs text-slate-500 mt-0.5">
               Pilih{' '}
               <code className="font-mono text-slate-700">Code_Akun_OPD.gs</code>{' '}
-              untuk Sheet Akun Super Admin, atau{' '}
-              <code className="font-mono text-slate-700">Code.gs</code> untuk
-              dicangkokkan pada Sheet milik masing-masing OPD.
+              untuk Sheet Akun Super Admin (mengelola tab{' '}
+              <code className="font-mono text-slate-700">Akun_OPD</code> &amp;{' '}
+              <code className="font-mono text-slate-700">
+                Permohonan_PIN_OPD
+              </code>
+              ), atau <code className="font-mono text-slate-700">Code.gs</code>{' '}
+              untuk dicangkokkan pada Sheet data milik masing-masing OPD.
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2 shrink-0">

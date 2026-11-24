@@ -31,6 +31,32 @@ export interface OpdAccount {
   dibuatPada: string;
 }
 
+export type RegistrationRequestStatus =
+  | 'Menunggu Persetujuan'
+  | 'PIN Diterbitkan'
+  | 'Sudah Digunakan'
+  | 'Ditolak';
+
+export interface OpdRegistrationRequestView {
+  id: string;
+  opdId: string;
+  namaOpd: string;
+  namaPemohon: string;
+  jabatan: string;
+  emailPemohon: string;
+  nomorKontak: string;
+  alasanPengajuan: string;
+  status: RegistrationRequestStatus;
+  pinHint: string | null;
+  pinIssuedAt: string | null;
+  pinExpiresAt: string | null;
+  approvedBy: string | null;
+  catatanAdmin: string | null;
+  dibuatPada: string;
+  digunakanPada: string | null;
+  syncedToSheet?: boolean;
+}
+
 export interface UserSession {
   id: string;
   role: AccountRole;
@@ -121,6 +147,8 @@ export interface DatasetMetadata {
   diperbaruiOleh: string;
 }
 
+export type SheetStorageMode = 'google_sheet' | 'server_standalone';
+
 export interface OpdDynamicSheet {
   id: string;
   accountId: string;
@@ -130,6 +158,7 @@ export interface OpdDynamicSheet {
   driveFolderUrl: string;
   judulDataset: string;
   deskripsi: string;
+  storageMode?: SheetStorageMode;
   sheetUrl: string;
   sheetId: string;
   sheetName: string;
@@ -151,7 +180,11 @@ export interface DynamicSheetRow {
   values: Record<string, string>;
 }
 
-export type SyncSource = 'webhook' | 'sheet_csv' | 'local_cache';
+export type SyncSource =
+  | 'webhook'
+  | 'sheet_csv'
+  | 'server_sovereign'
+  | 'local_cache';
 
 export type ActiveNavSection =
   | 'ringkasan'

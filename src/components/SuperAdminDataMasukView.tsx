@@ -657,15 +657,21 @@ export function SuperAdminDataMasukView({
                   />
                 </div>
 
-                <a
-                  href={activeSheet.sheetUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex items-center gap-1.5 h-9 px-3 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-md hover:bg-slate-50 whitespace-nowrap"
-                >
-                  <ExternalLink className="w-3.5 h-3.5" />
-                  Buka Sheet Asli
-                </a>
+                {activeSheet.sheetUrl ? (
+                  <a
+                    href={activeSheet.sheetUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 h-9 px-3 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-md hover:bg-slate-50 whitespace-nowrap"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    Buka Sheet Asli
+                  </a>
+                ) : (
+                  <span className="inline-flex items-center h-9 px-3 text-xs font-medium text-teal-800 bg-teal-50 border border-teal-200 rounded-md whitespace-nowrap">
+                    Penyimpanan Mandiri Server
+                  </span>
+                )}
 
                 <button
                   type="button"
