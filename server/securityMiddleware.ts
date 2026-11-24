@@ -9,6 +9,14 @@ export interface WafIncidentRecord {
   tingkat: 'Rendah' | 'Sedang' | 'Tinggi' | 'Kritis';
 }
 
+export interface CloudflareWafRuntimeConfig {
+  strictOriginLock: boolean;
+  originVerifyHeaderName: string;
+  originVerifySecret: string;
+  blockHighThreatScore: boolean;
+  threatScoreThreshold: number;
+}
+
 export interface SecurityMiddlewareOptions {
   allowedMethods?: string[];
   maxUrlLength?: number;
@@ -24,6 +32,10 @@ export interface SecurityMiddlewareOptions {
   wafBodyExemptPaths?: string[];
   /** Paths handled by interactive Honeypot traps instead of immediate 404 */
   honeypotPaths?: string[];
+  /** Optional dynamic getter for Cloudflare WAF origin lock & threat score rules */
+  getCloudflareWafConfig?: () => CloudflareWafRuntimeConfig;
+  /** Optional counters callback for WAF telemetry */
+  onWafEvent?: (eventType: 'inspected' | 'origin_bypass' | 'threat_score' | 'waf_block') => void;
   onIncident?: (incident: WafIncidentRecord) => void;
 }
 
@@ -94,14 +106,14 @@ const WAF_RULES: Array<{ id: string; scope: 'url' | 'all'; re: RegExp }> = [
 const DANGEROUS_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const BODY_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
-const CSP_REPORT_ONLY = [
+const CSP_POLICY = [
   "default-src 'self'",
-  "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://unpkg.com https://apis.google.com",
+  "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://challenges.cloudflare.com https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://unpkg.com https://apis.google.com",
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com https://cdn.jsdelivr.net",
   "font-src 'self' data: https://fonts.gstatic.com https://cdnjs.cloudflare.com https://cdn.jsdelivr.net",
   "img-src 'self' data: blob: https:",
-  "connect-src 'self' https://script.google.com https://script.googleusercontent.com https://docs.google.com https://sheets.googleapis.com https://*.googleusercontent.com",
-  "frame-src 'self' https://script.google.com https://*.googleusercontent.com https://docs.google.com https://drive.google.com",
+  "connect-src 'self' https://challenges.cloudflare.com https://script.google.com https://script.googleusercontent.com https://docs.google.com https://sheets.googleapis.com https://*.googleusercontent.com",
+  "frame-src 'self' https://challenges.cloudflare.com https://script.google.com https://*.googleusercontent.com https://docs.google.com https://drive.google.com",
   "base-uri 'self'",
   "form-action 'self' https://script.google.com",
   "object-src 'none'",
@@ -182,6 +194,14 @@ export function verifyWebhookHmac(
 }
 
 function getClientIp(req: express.Request): string {
+  const cfConnectingIp = req.headers['cf-connecting-ip'];
+  if (typeof cfConnectingIp === 'string' && cfConnectingIp.trim().length > 0) {
+    return cfConnectingIp.trim();
+  }
+  const trueClientIp = req.headers['true-client-ip'];
+  if (typeof trueClientIp === 'string' && trueClientIp.trim().length > 0) {
+    return trueClientIp.trim();
+  }
   const forwarded = req.headers['x-forwarded-for'];
   if (typeof forwarded === 'string' && forwarded.length > 0) {
     return forwarded.split(',')[0].trim();
@@ -189,9 +209,19 @@ function getClientIp(req: express.Request): string {
   return req.ip || req.socket.remoteAddress || 'unknown';
 }
 
+function safeCompareSecret(a: string, b: string): boolean {
+  const bufA = Buffer.from(a, 'utf8');
+  const bufB = Buffer.from(b, 'utf8');
+  if (bufA.length !== bufB.length) {
+    crypto.timingSafeEqual(bufA, bufA);
+    return false;
+  }
+  return crypto.timingSafeEqual(bufA, bufB);
+}
+
 export function createSecurityMiddleware(options: SecurityMiddlewareOptions = {}) {
   const allowedMethods = new Set(
-    options.allowedMethods || ['GET', 'HEAD', 'POST', 'OPTIONS']
+    options.allowedMethods || ['GET', 'HEAD', 'POST', 'PUT', 'DELETE', 'OPTIONS']
   );
   const maxUrlLength = options.maxUrlLength ?? 4096;
   const rateLimitReadMax = options.rateLimitReadMax ?? 120;
@@ -274,12 +304,13 @@ export function createSecurityMiddleware(options: SecurityMiddlewareOptions = {}
     }
   };
 
-  // Pre-body guard (headers, method, URL, scanner UA, probe paths, rate-limit, security.txt, CSP report)
+  // Pre-body guard (Cloudflare Edge validation, headers, method, URL, scanner UA, probe paths, rate-limit, security.txt, CSP)
   const preGuard: express.RequestHandler = (req, res, next) => {
     const ip = getClientIp(req);
     const now = Date.now();
+    options.onWafEvent?.('inspected');
 
-    // 1. Security Headers (preserve iframe compatibility for preview)
+    // 1. Security Headers (Cloudflare WAF compatible + preserve iframe preview)
     res.removeHeader('X-Powered-By');
     res.removeHeader('Server');
     res.setHeader(
@@ -296,8 +327,66 @@ export function createSecurityMiddleware(options: SecurityMiddlewareOptions = {}
     res.setHeader('Cross-Origin-Resource-Policy', 'same-site');
     res.setHeader('X-DNS-Prefetch-Control', 'off');
     res.setHeader('X-Permitted-Cross-Domain-Policies', 'none');
-    res.setHeader('Content-Security-Policy-Report-Only', CSP_REPORT_ONLY);
+    res.setHeader('Content-Security-Policy-Report-Only', CSP_POLICY);
+    res.setHeader('X-SatuData-WAF', 'cloudflare-ready-active');
     res.setHeader('X-Request-Id', crypto.randomBytes(8).toString('hex'));
+
+    // 1b. Cloudflare Origin Lock & Threat-Score Guard
+    const cfConfig = options.getCloudflareWafConfig?.();
+    const cfRayHeader = typeof req.headers['cf-ray'] === 'string' ? req.headers['cf-ray'].trim() : '';
+    const cfIpHeader =
+      typeof req.headers['cf-connecting-ip'] === 'string'
+        ? req.headers['cf-connecting-ip'].trim()
+        : '';
+
+    if (cfConfig?.strictOriginLock) {
+      const headerKey = (cfConfig.originVerifyHeaderName || 'x-cf-origin-verify').toLowerCase();
+      const incomingOriginSecret = String(req.headers[headerKey] || '').trim();
+      const isLocalLoopback =
+        ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+      const hasValidEdgeHeaders =
+        Boolean(cfRayHeader && cfIpHeader) &&
+        (!cfConfig.originVerifySecret ||
+          safeCompareSecret(incomingOriginSecret, cfConfig.originVerifySecret));
+
+      if (!isLocalLoopback && !hasValidEdgeHeaders) {
+        options.onWafEvent?.('origin_bypass');
+        options.onIncident?.({
+          ip,
+          path: req.path,
+          jenisAncaman: 'Bypass Cloudflare WAF Diblokir (Direct-to-Origin)',
+          taktikPengelabuan:
+            'Permintaan langsung ke server origin tanpa header Cloudflare Ray / X-CF-Origin-Verify ditolak.',
+          tingkat: 'Kritis',
+        });
+        logEvent('blocked', req, ip, { status: 403, reason: 'cloudflare-origin-lock' });
+        return res.status(403).json({
+          ok: false,
+          error: 'Akses ditolak. Trafik wajib melalui proteksi Cloudflare WAF.',
+        });
+      }
+    }
+
+    if (cfConfig?.blockHighThreatScore) {
+      const rawScore = req.headers['cf-threat-score'];
+      const threatScore = typeof rawScore === 'string' ? Number(rawScore) : NaN;
+      if (Number.isFinite(threatScore) && threatScore >= cfConfig.threatScoreThreshold) {
+        options.onWafEvent?.('threat_score');
+        options.onIncident?.({
+          ip,
+          path: req.path,
+          jenisAncaman: `Cloudflare Threat Score Tinggi (${threatScore})`,
+          taktikPengelabuan:
+            'Reputasi IP buruk terdeteksi oleh Cloudflare Edge dan diblokir sebelum memproses aplikasi.',
+          tingkat: 'Kritis',
+        });
+        logEvent('blocked', req, ip, { status: 403, reason: 'cf-threat-score', threatScore });
+        return res.status(403).json({
+          ok: false,
+          error: 'Akses ditolak oleh Cloudflare Threat Intelligence.',
+        });
+      }
+    }
 
     // 2. /.well-known/security.txt
     if (req.path === '/.well-known/security.txt' && req.method === 'GET') {
@@ -391,6 +480,7 @@ export function createSecurityMiddleware(options: SecurityMiddlewareOptions = {}
         'url'
       );
       if (urlHit) {
+        options.onWafEvent?.('waf_block');
         recordStrike(ip, req.path, `waf:${urlHit}`);
         options.onIncident?.({
           ip,
@@ -412,6 +502,7 @@ export function createSecurityMiddleware(options: SecurityMiddlewareOptions = {}
         typeof val === 'string' &&
         /\$\{\s*(?:jndi|env|sys|lower|upper)\s*:/i.test(decodeLayers(val))
       ) {
+        options.onWafEvent?.('waf_block');
         recordStrike(ip, req.path, 'waf:log4shell-header');
         options.onIncident?.({
           ip,
@@ -442,6 +533,7 @@ export function createSecurityMiddleware(options: SecurityMiddlewareOptions = {}
     const strings: string[] = [];
     const structuralHit = walkJsonForWaf(req.body, strings);
     if (structuralHit) {
+      options.onWafEvent?.('waf_block');
       recordStrike(ip, req.path, `waf:${structuralHit}`);
       options.onIncident?.({
         ip,
@@ -458,6 +550,7 @@ export function createSecurityMiddleware(options: SecurityMiddlewareOptions = {}
     for (const s of strings) {
       const hit = inspectWafPayload(decodeLayers(s), 'all');
       if (hit) {
+        options.onWafEvent?.('waf_block');
         recordStrike(ip, req.path, `waf:${hit}`);
         options.onIncident?.({
           ip,

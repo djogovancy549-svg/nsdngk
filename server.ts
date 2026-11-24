@@ -192,6 +192,160 @@ function isAuthorizedSuperAdminEmail(email: string): boolean {
   );
 }
 
+// Persistent Cloudflare WAF & Edge Protection Config (data/cloudflare-waf.json)
+const CLOUDFLARE_WAF_CONFIG_PATH = path.resolve(
+  __dirname,
+  'data',
+  'cloudflare-waf.json'
+);
+
+interface CloudflareWafConfigStore {
+  strictOriginLock: boolean;
+  originVerifyHeaderName: string;
+  originVerifySecret: string;
+  blockHighThreatScore: boolean;
+  threatScoreThreshold: number;
+  turnstileEnabled: boolean;
+  turnstileSiteKey: string;
+  turnstileSecretKey: string;
+  updatedAt: string;
+}
+
+function loadCloudflareWafConfig(): CloudflareWafConfigStore {
+  const defaultOriginSecret =
+    process.env.CF_ORIGIN_VERIFY_SECRET?.trim() ||
+    `CF-ORG-${crypto.randomBytes(16).toString('hex').toUpperCase()}`;
+
+  const defaults: CloudflareWafConfigStore = {
+    strictOriginLock: process.env.CLOUDFLARE_STRICT_ORIGIN === 'true',
+    originVerifyHeaderName: 'X-CF-Origin-Verify',
+    originVerifySecret: defaultOriginSecret,
+    blockHighThreatScore: true,
+    threatScoreThreshold: Number(process.env.CLOUDFLARE_THREAT_THRESHOLD || 35),
+    turnstileEnabled: Boolean(
+      process.env.TURNSTILE_SITE_KEY?.trim() &&
+        process.env.TURNSTILE_SECRET_KEY?.trim()
+    ),
+    turnstileSiteKey: process.env.TURNSTILE_SITE_KEY?.trim() || '',
+    turnstileSecretKey: process.env.TURNSTILE_SECRET_KEY?.trim() || '',
+    updatedAt: '',
+  };
+
+  try {
+    if (fs.existsSync(CLOUDFLARE_WAF_CONFIG_PATH)) {
+      const parsed = JSON.parse(
+        fs.readFileSync(CLOUDFLARE_WAF_CONFIG_PATH, 'utf8')
+      ) as Partial<CloudflareWafConfigStore>;
+      return {
+        strictOriginLock:
+          typeof parsed.strictOriginLock === 'boolean'
+            ? parsed.strictOriginLock
+            : defaults.strictOriginLock,
+        originVerifyHeaderName:
+          String(parsed.originVerifyHeaderName || '').trim() ||
+          defaults.originVerifyHeaderName,
+        originVerifySecret:
+          String(parsed.originVerifySecret || '').trim() ||
+          defaults.originVerifySecret,
+        blockHighThreatScore:
+          typeof parsed.blockHighThreatScore === 'boolean'
+            ? parsed.blockHighThreatScore
+            : defaults.blockHighThreatScore,
+        threatScoreThreshold:
+          Number.isFinite(Number(parsed.threatScoreThreshold))
+            ? Math.max(5, Math.min(100, Number(parsed.threatScoreThreshold)))
+            : defaults.threatScoreThreshold,
+        turnstileEnabled:
+          typeof parsed.turnstileEnabled === 'boolean'
+            ? parsed.turnstileEnabled
+            : defaults.turnstileEnabled,
+        turnstileSiteKey:
+          typeof parsed.turnstileSiteKey === 'string'
+            ? parsed.turnstileSiteKey.trim()
+            : defaults.turnstileSiteKey,
+        turnstileSecretKey:
+          typeof parsed.turnstileSecretKey === 'string'
+            ? parsed.turnstileSecretKey.trim()
+            : defaults.turnstileSecretKey,
+        updatedAt: String(parsed.updatedAt || ''),
+      };
+    }
+  } catch {
+    // Fallback ke default
+  }
+
+  try {
+    const dir = path.dirname(CLOUDFLARE_WAF_CONFIG_PATH);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      CLOUDFLARE_WAF_CONFIG_PATH,
+      JSON.stringify(defaults, null, 2),
+      'utf8'
+    );
+  } catch {
+    // Abaikan jika filesystem read-only
+  }
+
+  return defaults;
+}
+
+function saveCloudflareWafConfig(
+  next: CloudflareWafConfigStore
+): CloudflareWafConfigStore {
+  const saved: CloudflareWafConfigStore = {
+    ...next,
+    updatedAt: new Date().toISOString(),
+  };
+  try {
+    const dir = path.dirname(CLOUDFLARE_WAF_CONFIG_PATH);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      CLOUDFLARE_WAF_CONFIG_PATH,
+      JSON.stringify(saved, null, 2),
+      'utf8'
+    );
+  } catch {
+    // Tetap aktif di memori
+  }
+  return saved;
+}
+
+let activeCloudflareWafConfig: CloudflareWafConfigStore =
+  loadCloudflareWafConfig();
+
+const wafMetrics = {
+  inspected: 0,
+  blockedOriginBypass: 0,
+  blockedThreatScore: 0,
+  wafBlocks: 0,
+};
+
+async function verifyTurnstileToken(
+  token: string,
+  secretKey: string,
+  remoteIp: string
+): Promise<boolean> {
+  if (!token || !secretKey) return false;
+  try {
+    const form = new URLSearchParams();
+    form.set('secret', secretKey);
+    form.set('response', token);
+    if (remoteIp && remoteIp !== 'unknown') form.set('remoteip', remoteIp);
+    const resp = await fetch(
+      'https://challenges.cloudflare.com/turnstile/v0/siteverify',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: form.toString(),
+      }
+    );
+    const json = (await resp.json()) as { success?: boolean };
+    return Boolean(json?.success);
+  } catch {
+    return false;
+  }
+}
+
 // Persistent Server Secrets (SESSION_SECRET & APPS_SCRIPT_SECRET — never shipped to browser bundle)
 const SECRETS_FILE_PATH = path.resolve(__dirname, 'data', 'server-secrets.json');
 interface ServerSecrets {
@@ -477,6 +631,14 @@ const MAX_FAILED_ATTEMPTS = 5;
 const LOCKOUT_MS = 5 * 60 * 1000; // 5 minutes
 
 function getClientIp(req: express.Request): string {
+  const cfConnectingIp = req.headers['cf-connecting-ip'];
+  if (typeof cfConnectingIp === 'string' && cfConnectingIp.trim().length > 0) {
+    return cfConnectingIp.trim();
+  }
+  const trueClientIp = req.headers['true-client-ip'];
+  if (typeof trueClientIp === 'string' && trueClientIp.trim().length > 0) {
+    return trueClientIp.trim();
+  }
   const forwarded = req.headers['x-forwarded-for'];
   if (typeof forwarded === 'string' && forwarded.length > 0) {
     return forwarded.split(',')[0].trim();
@@ -724,7 +886,7 @@ async function startServer() {
     '/api/debug/secrets',
   ];
 
-  // Lapisan Keamanan Lengkap (WAF, Scanner/Probe Blocker, Rate Limit Baca/Tulis, Auto-Ban, CSP, Security Headers, security.txt)
+  // Lapisan Keamanan Lengkap (Cloudflare WAF + App WAF, Scanner/Probe Blocker, Rate Limit Baca/Tulis, Auto-Ban, CSP, Security Headers, security.txt)
   const { preGuard, bodyWafGuard } = createSecurityMiddleware({
     securityContact: `mailto:${SERVER_SUPER_ADMIN_EMAIL}`,
     wafBodyExemptPaths: [
@@ -734,6 +896,13 @@ async function startServer() {
       '/api/bigquery/query',
     ],
     honeypotPaths: HONEYPOT_DECOY_PATHS,
+    getCloudflareWafConfig: () => activeCloudflareWafConfig,
+    onWafEvent: (ev) => {
+      if (ev === 'inspected') wafMetrics.inspected++;
+      else if (ev === 'origin_bypass') wafMetrics.blockedOriginBypass++;
+      else if (ev === 'threat_score') wafMetrics.blockedThreatScore++;
+      else if (ev === 'waf_block') wafMetrics.wafBlocks++;
+    },
     onIncident: (inc) => {
       recordServerIntrusion(
         inc.ip,
@@ -749,8 +918,22 @@ async function startServer() {
   app.use(express.json({ limit: '1mb' }));
   app.use(bodyWafGuard);
 
-  // 1. Server-side Super Admin Authentication (strictly email-allowlisted + brute-force lockout)
-  app.post('/api/auth/superadmin', (req, res) => {
+  // 0. Konfigurasi Cloudflare Turnstile Publik (tanpa membocorkan secret key)
+  app.get('/api/auth/turnstile-config', (_req, res) => {
+    const enabled = Boolean(
+      activeCloudflareWafConfig.turnstileEnabled &&
+        activeCloudflareWafConfig.turnstileSiteKey &&
+        activeCloudflareWafConfig.turnstileSecretKey
+    );
+    return res.json({
+      ok: true,
+      enabled,
+      siteKey: enabled ? activeCloudflareWafConfig.turnstileSiteKey : '',
+    });
+  });
+
+  // 1. Server-side Super Admin Authentication (strictly email-allowlisted + brute-force lockout + optional Turnstile)
+  app.post('/api/auth/superadmin', async (req, res) => {
     const ip = getClientIp(req);
     const now = Date.now();
     const state = loginAttemptsByIp.get(ip) || { attempts: 0, lockedUntil: 0 };
@@ -763,6 +946,27 @@ async function startServer() {
         retryAfterSec: remainingSec,
         message: `Terlalu banyak percobaan gagal. Akses dikunci selama ${remainingSec} detik demi keamanan.`,
       });
+    }
+
+    if (
+      activeCloudflareWafConfig.turnstileEnabled &&
+      activeCloudflareWafConfig.turnstileSiteKey &&
+      activeCloudflareWafConfig.turnstileSecretKey
+    ) {
+      const turnstileToken = String(req.body?.turnstileToken ?? '').trim();
+      const verifiedTurnstile = await verifyTurnstileToken(
+        turnstileToken,
+        activeCloudflareWafConfig.turnstileSecretKey,
+        ip
+      );
+      if (!verifiedTurnstile) {
+        return res.status(403).json({
+          ok: false,
+          turnstileFailed: true,
+          message:
+            'Verifikasi anti-bot Cloudflare Turnstile gagal atau kedaluwarsa. Selesaikan tantangan verifikasi terlebih dahulu.',
+        });
+      }
     }
 
     const identifier = normalizeEmail(req.body?.identifier);
@@ -1509,6 +1713,346 @@ async function startServer() {
           err instanceof Error ? err.message : 'Gagal menjalankan query SQL.',
       });
     }
+  });
+
+  // 1a-5. Manajemen Cloudflare WAF, Origin Lock & Anti-Bot Turnstile
+  app.get('/api/security/cloudflare-waf', (req, res) => {
+    if (!requireSuperAdminActor(req, res)) return;
+    const cfRay = typeof req.headers['cf-ray'] === 'string' ? req.headers['cf-ray'] : '';
+    const cfCountry =
+      typeof req.headers['cf-ipcountry'] === 'string' ? req.headers['cf-ipcountry'] : '';
+    const cfThreatScore =
+      typeof req.headers['cf-threat-score'] === 'string'
+        ? req.headers['cf-threat-score']
+        : '';
+    const cfConnectingIp =
+      typeof req.headers['cf-connecting-ip'] === 'string'
+        ? req.headers['cf-connecting-ip']
+        : '';
+
+    return res.json({
+      ok: true,
+      edgeTelemetry: {
+        behindCloudflare: Boolean(cfRay && cfConnectingIp),
+        cfRay: cfRay || null,
+        cfCountry: cfCountry || null,
+        cfThreatScore: cfThreatScore || null,
+        clientIp: getClientIp(req),
+      },
+      config: {
+        strictOriginLock: activeCloudflareWafConfig.strictOriginLock,
+        originVerifyHeaderName: activeCloudflareWafConfig.originVerifyHeaderName,
+        originVerifySecret: activeCloudflareWafConfig.originVerifySecret,
+        blockHighThreatScore: activeCloudflareWafConfig.blockHighThreatScore,
+        threatScoreThreshold: activeCloudflareWafConfig.threatScoreThreshold,
+        turnstileEnabled: activeCloudflareWafConfig.turnstileEnabled,
+        turnstileSiteKey: activeCloudflareWafConfig.turnstileSiteKey,
+        hasTurnstileSecret: Boolean(activeCloudflareWafConfig.turnstileSecretKey),
+        updatedAt: activeCloudflareWafConfig.updatedAt,
+      },
+      metrics: wafMetrics,
+    });
+  });
+
+  app.put('/api/security/cloudflare-waf', (req, res) => {
+    if (!requireSuperAdminActor(req, res)) return;
+    const body = req.body || {};
+    const threshold = Number(body.threatScoreThreshold);
+    const nextSecret =
+      typeof body.turnstileSecretKey === 'string' &&
+      body.turnstileSecretKey.trim().length > 0
+        ? body.turnstileSecretKey.trim()
+        : activeCloudflareWafConfig.turnstileSecretKey;
+
+    activeCloudflareWafConfig = saveCloudflareWafConfig({
+      ...activeCloudflareWafConfig,
+      strictOriginLock:
+        typeof body.strictOriginLock === 'boolean'
+          ? body.strictOriginLock
+          : activeCloudflareWafConfig.strictOriginLock,
+      blockHighThreatScore:
+        typeof body.blockHighThreatScore === 'boolean'
+          ? body.blockHighThreatScore
+          : activeCloudflareWafConfig.blockHighThreatScore,
+      threatScoreThreshold: Number.isFinite(threshold)
+        ? Math.max(5, Math.min(100, threshold))
+        : activeCloudflareWafConfig.threatScoreThreshold,
+      turnstileEnabled:
+        typeof body.turnstileEnabled === 'boolean'
+          ? body.turnstileEnabled
+          : activeCloudflareWafConfig.turnstileEnabled,
+      turnstileSiteKey:
+        typeof body.turnstileSiteKey === 'string'
+          ? body.turnstileSiteKey.trim()
+          : activeCloudflareWafConfig.turnstileSiteKey,
+      turnstileSecretKey: nextSecret,
+    });
+
+    return res.json({
+      ok: true,
+      config: {
+        strictOriginLock: activeCloudflareWafConfig.strictOriginLock,
+        originVerifyHeaderName: activeCloudflareWafConfig.originVerifyHeaderName,
+        originVerifySecret: activeCloudflareWafConfig.originVerifySecret,
+        blockHighThreatScore: activeCloudflareWafConfig.blockHighThreatScore,
+        threatScoreThreshold: activeCloudflareWafConfig.threatScoreThreshold,
+        turnstileEnabled: activeCloudflareWafConfig.turnstileEnabled,
+        turnstileSiteKey: activeCloudflareWafConfig.turnstileSiteKey,
+        hasTurnstileSecret: Boolean(activeCloudflareWafConfig.turnstileSecretKey),
+        updatedAt: activeCloudflareWafConfig.updatedAt,
+      },
+      message: 'Konfigurasi Cloudflare WAF & Edge Security berhasil diperbarui.',
+    });
+  });
+
+  app.post('/api/security/cloudflare-waf/rotate-origin-secret', (req, res) => {
+    if (!requireSuperAdminActor(req, res)) return;
+    const nextSecret = `CF-ORG-${crypto
+      .randomBytes(18)
+      .toString('hex')
+      .toUpperCase()}`;
+    activeCloudflareWafConfig = saveCloudflareWafConfig({
+      ...activeCloudflareWafConfig,
+      originVerifySecret: nextSecret,
+    });
+    return res.json({
+      ok: true,
+      originVerifySecret: nextSecret,
+      message:
+        'Token verifikasi header Origin Cloudflare baru berhasil dibuat. Perbarui Transform Rule di Cloudflare Dashboard Anda.',
+    });
+  });
+
+  // 1a-6. Node Interoperabilitas Standar Nasional: CKAN API v3 & W3C DCAT / JSON-SDI Feed (Read-Only, Khusus Dataset Terverifikasi & Publik)
+  const PUBLIC_CATALOG_PATH = path.resolve(
+    __dirname,
+    'data',
+    'public-catalog.json'
+  );
+
+  interface PublicCatalogDatasetItem {
+    id: string;
+    slug: string;
+    judulDataset: string;
+    deskripsi: string;
+    produsenData: string;
+    walidata: string;
+    urusanPemerintahan: string;
+    kodeReferensi: string;
+    tahunData: string;
+    frekuensiPemutakhiran: string;
+    cakupanWilayah: string;
+    satuanPengukuran: string;
+    kontakPic: string;
+    headers: string[];
+    jumlahBaris: number;
+    diperbaruiPada: string;
+  }
+
+  const loadPublicCatalog = (): PublicCatalogDatasetItem[] => {
+    try {
+      if (fs.existsSync(PUBLIC_CATALOG_PATH)) {
+        const parsed = JSON.parse(fs.readFileSync(PUBLIC_CATALOG_PATH, 'utf8'));
+        if (Array.isArray(parsed)) return parsed as PublicCatalogDatasetItem[];
+      }
+    } catch {
+      // Abaikan
+    }
+    return [];
+  };
+
+  const savePublicCatalog = (items: PublicCatalogDatasetItem[]) => {
+    try {
+      const dir = path.dirname(PUBLIC_CATALOG_PATH);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(
+        PUBLIC_CATALOG_PATH,
+        JSON.stringify(items, null, 2),
+        'utf8'
+      );
+    } catch {
+      // Abaikan
+    }
+  };
+
+  let publicHarvestCatalog: PublicCatalogDatasetItem[] = loadPublicCatalog();
+
+  app.post('/api/public/catalog/sync', (req, res) => {
+    if (!requireSuperAdminActor(req, res)) return;
+    const rawSheets = Array.isArray(req.body?.datasets) ? req.body.datasets : [];
+    const verifiedPublic: PublicCatalogDatasetItem[] = [];
+
+    for (const item of rawSheets) {
+      const id = String(item?.id || '').trim();
+      if (!id) continue;
+      const meta = serverMetadataMap[id] as Record<string, unknown> | undefined;
+      const statusValidasi = String(
+        meta?.statusValidasi || item?.statusValidasi || ''
+      );
+      const tingkatAkses = String(
+        meta?.tingkatAkses || item?.tingkatAkses || ''
+      );
+      // Hanya dataset yang sudah Terverifikasi Walidata dan berstatus Terbuka (Publik) yang masuk ke feed harvesting!
+      if (
+        statusValidasi !== 'Terverifikasi Walidata' ||
+        tingkatAkses !== 'Terbuka (Publik)'
+      ) {
+        continue;
+      }
+
+      const judul = String(item?.judulDataset || '').trim();
+      const slug =
+        judul
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-+|-+$/g, '') || id.toLowerCase();
+
+      verifiedPublic.push({
+        id,
+        slug: `${slug}-${id.slice(-4).toLowerCase()}`,
+        judulDataset: judul,
+        deskripsi: String(
+          meta?.konsepDefinisi || item?.deskripsi || ''
+        ).trim(),
+        produsenData: String(
+          meta?.produsenData || item?.namaOpd || ''
+        ).trim(),
+        walidata: String(
+          meta?.walidata || activeRegencyConfig.namaWalidata
+        ).trim(),
+        urusanPemerintahan: String(meta?.urusanPemerintahan || '').trim(),
+        kodeReferensi: String(meta?.kodeReferensi || '').trim(),
+        tahunData: String(
+          meta?.tahunData || new Date().getFullYear()
+        ).trim(),
+        frekuensiPemutakhiran: String(
+          meta?.frekuensiPemutakhiran || 'Tahunan'
+        ).trim(),
+        cakupanWilayah: String(meta?.cakupanWilayah || 'Kabupaten').trim(),
+        satuanPengukuran: String(meta?.satuanPengukuran || '').trim(),
+        kontakPic: String(meta?.kontakPic || '').trim(),
+        headers: Array.isArray(item?.headers)
+          ? item.headers.map((h: unknown) => String(h))
+          : [],
+        jumlahBaris: Number(item?.jumlahBaris || 0),
+        diperbaruiPada: String(
+          meta?.diperbaruiPada || new Date().toISOString()
+        ),
+      });
+    }
+
+    publicHarvestCatalog = verifiedPublic;
+    savePublicCatalog(publicHarvestCatalog);
+
+    return res.json({
+      ok: true,
+      publishedCount: publicHarvestCatalog.length,
+      message: `${publicHarvestCatalog.length} dataset Terverifikasi & Publik berhasil disinkronkan ke endpoint harvesting CKAN/DCAT.`,
+    });
+  });
+
+  // W3C DCAT / Satu Data Indonesia Feed (Read-Only)
+  app.get('/api/public/dcat.json', (req, res) => {
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    res.setHeader('Cache-Control', 'public, max-age=120');
+    return res.json({
+      '@context': 'https://project-open-data.cio.gov/v1.1/schema/catalog.jsonld',
+      conformsTo: 'https://project-open-data.cio.gov/v1.1/schema',
+      describedBy: `${baseUrl}/api/public/dcat.json`,
+      title: `${activeRegencyConfig.namaPortal} — Katalog Interoperabilitas SDI`,
+      publisher: {
+        '@type': 'org:Organization',
+        name: activeRegencyConfig.namaWalidata,
+      },
+      generatedAt: new Date().toISOString(),
+      dataset: publicHarvestCatalog.map((d) => ({
+        '@type': 'dcat:Dataset',
+        identifier: d.kodeReferensi || d.id,
+        slug: d.slug,
+        title: d.judulDataset,
+        description: d.deskripsi || `Dataset sektoral ${d.judulDataset}`,
+        keyword: [d.urusanPemerintahan, d.cakupanWilayah, d.tahunData].filter(
+          Boolean
+        ),
+        modified: d.diperbaruiPada,
+        publisher: {
+          '@type': 'org:Organization',
+          name: d.produsenData,
+        },
+        spatial: `${activeRegencyConfig.namaKabupaten} (${d.cakupanWilayah})`,
+        temporal: d.tahunData,
+        accrualPeriodicity: d.frekuensiPemutakhiran,
+        schemaFields: d.headers,
+        recordCount: d.jumlahBaris,
+        distribution: [
+          {
+            '@type': 'dcat:Distribution',
+            mediaType: 'application/json',
+            format: 'CKAN-JSON',
+            accessURL: `${baseUrl}/api/public/ckan/package_show?id=${encodeURIComponent(
+              d.slug
+            )}`,
+          },
+        ],
+      })),
+    });
+  });
+
+  // CKAN Action API v3 Compatible: package_list
+  app.get('/api/public/ckan/package_list', (_req, res) => {
+    res.setHeader('Cache-Control', 'public, max-age=120');
+    return res.json({
+      help: 'Daftar dataset Terverifikasi Walidata & Terbuka (Publik) kompatibel CKAN Action API v3.',
+      success: true,
+      result: publicHarvestCatalog.map((d) => d.slug),
+    });
+  });
+
+  // CKAN Action API v3 Compatible: package_show
+  app.get('/api/public/ckan/package_show', (req, res) => {
+    const idOrSlug = String(req.query?.id || '').trim().toLowerCase();
+    const found = publicHarvestCatalog.find(
+      (d) =>
+        d.slug.toLowerCase() === idOrSlug ||
+        d.id.toLowerCase() === idOrSlug ||
+        d.kodeReferensi.toLowerCase() === idOrSlug
+    );
+    if (!found) {
+      return res.status(404).json({
+        success: false,
+        error: {
+          __type: 'Not Found Error',
+          message: 'Dataset tidak ditemukan atau belum berstatus Terverifikasi & Publik.',
+        },
+      });
+    }
+
+    res.setHeader('Cache-Control', 'public, max-age=120');
+    return res.json({
+      success: true,
+      result: {
+        id: found.id,
+        name: found.slug,
+        title: found.judulDataset,
+        notes: found.deskripsi,
+        metadata_modified: found.diperbaruiPada,
+        organization: {
+          name: found.produsenData.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
+          title: found.produsenData,
+        },
+        extras: [
+          { key: 'kode_referensi', value: found.kodeReferensi },
+          { key: 'walidata', value: found.walidata },
+          { key: 'urusan_pemerintahan', value: found.urusanPemerintahan },
+          { key: 'tahun_data', value: found.tahunData },
+          { key: 'frekuensi', value: found.frekuensiPemutakhiran },
+          { key: 'cakupan_wilayah', value: found.cakupanWilayah },
+          { key: 'satuan', value: found.satuanPengukuran },
+          { key: 'jumlah_baris', value: String(found.jumlahBaris) },
+        ],
+        schema_columns: found.headers,
+      },
+    });
   });
 
   // 1b. Honeypot Decoy Trap Endpoints (Membingungkan & memperlambat pemindai/peretas otomatis)

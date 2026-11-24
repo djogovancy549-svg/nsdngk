@@ -298,9 +298,16 @@ export default function App() {
   const handleLogin = async (
     email: string,
     password: string,
-    loginRole: 'opd' | 'super_admin'
+    loginRole: 'opd' | 'super_admin',
+    turnstileToken?: string
   ) => {
-    const result = await authenticateUser(email, password, accounts, loginRole);
+    const result = await authenticateUser(
+      email,
+      password,
+      accounts,
+      loginRole,
+      turnstileToken
+    );
     if (result.ok && result.session) {
       setSession(result.session);
       saveSession(result.session);
@@ -1383,6 +1390,7 @@ export default function App() {
               regencyConfig={regencyConfig}
               sheets={sheets}
               rowsBySheet={rowsBySheet}
+              metadataBySheet={metadataBySheet}
               onRegencyConfigUpdated={setRegencyConfig}
             />
           )}

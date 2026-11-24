@@ -769,7 +769,8 @@ export async function authenticateUser(
   identifier: string,
   password: string,
   accounts: OpdAccount[],
-  loginRole: 'opd' | 'super_admin' = 'opd'
+  loginRole: 'opd' | 'super_admin' = 'opd',
+  turnstileToken?: string
 ): Promise<LoginResult> {
   const cleanEmail = identifier.trim().toLowerCase();
 
@@ -804,6 +805,7 @@ export async function authenticateUser(
           identifier: cleanEmail,
           password,
           loginRole: 'super_admin',
+          ...(turnstileToken ? { turnstileToken } : {}),
         }),
       });
 

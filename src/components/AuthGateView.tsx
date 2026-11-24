@@ -22,6 +22,7 @@ import {
   OpdDynamicSheet,
 } from '../types/satuData';
 import { RegencyWhiteLabelConfig } from '../services/regencyConfigService';
+import { fetchTurnstilePublicConfig } from '../services/cloudflareWafService';
 import { HeroBannerSlider } from './HeroBannerSlider';
 import { PortalGuideView } from './PortalGuideView';
 import { RunningSummaryTicker } from './RunningSummaryTicker';
@@ -45,7 +46,8 @@ interface AuthGateViewProps {
   onLogin: (
     email: string,
     password: string,
-    loginRole: 'opd' | 'super_admin'
+    loginRole: 'opd' | 'super_admin',
+    turnstileToken?: string
   ) => Promise<{ ok: boolean; message?: string }>;
   onRegister: (input: {
     opdId: string;
@@ -80,6 +82,73 @@ export function AuthGateView({
   const [aiWarning, setAiWarning] = useState<AiIntrusionWarning | null>(null);
   const [loginBusy, setLoginBusy] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
+  const [turnstileConfig, setTurnstileConfig] = useState<{
+    enabled: boolean;
+    siteKey: string;
+  }>({ enabled: false, siteKey: '' });
+  const [turnstileToken, setTurnstileToken] = useState('');
+  const turnstileContainerRef = React.useRef<HTMLDivElement | null>(null);
+
+  React.useEffect(() => {
+    let active = true;
+    fetchTurnstilePublicConfig().then((cfg) => {
+      if (active) setTurnstileConfig(cfg);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  React.useEffect(() => {
+    if (
+      !turnstileConfig.enabled ||
+      !turnstileConfig.siteKey ||
+      mode !== 'login' ||
+      loginRole !== 'super_admin'
+    ) {
+      return;
+    }
+
+    const renderWidget = () => {
+      const w = window as unknown as {
+        turnstile?: {
+          render: (
+            el: HTMLElement,
+            opts: {
+              sitekey: string;
+              callback: (token: string) => void;
+              'expired-callback': () => void;
+            }
+          ) => string;
+          remove?: (id: string) => void;
+        };
+      };
+      if (w.turnstile && turnstileContainerRef.current) {
+        turnstileContainerRef.current.innerHTML = '';
+        w.turnstile.render(turnstileContainerRef.current, {
+          sitekey: turnstileConfig.siteKey,
+          callback: (token: string) => setTurnstileToken(token),
+          'expired-callback': () => setTurnstileToken(''),
+        });
+      }
+    };
+
+    const existingScript = document.querySelector(
+      'script[data-cf-turnstile="true"]'
+    );
+    if (!existingScript) {
+      const script = document.createElement('script');
+      script.src =
+        'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+      script.async = true;
+      script.defer = true;
+      script.setAttribute('data-cf-turnstile', 'true');
+      script.onload = renderWidget;
+      document.head.appendChild(script);
+    } else {
+      renderWidget();
+    }
+  }, [turnstileConfig.enabled, turnstileConfig.siteKey, mode, loginRole]);
 
   // Register state
   const [selectedOpdId, setSelectedOpdId] = useState(OPD_DIRECTORY[0].id);
@@ -181,7 +250,12 @@ export function AuthGateView({
         );
       }
 
-      const res = await onLogin(identifier, password, loginRole);
+      const res = await onLogin(
+        identifier,
+        password,
+        loginRole,
+        loginRole === 'super_admin' ? turnstileToken : undefined
+      );
       if (!res.ok) {
         const nextFail = failedCount + 1;
         setFailedCount(nextFail);
@@ -614,6 +688,17 @@ export function AuthGateView({
                     />
                   </div>
                 )}
+
+                {turnstileConfig.enabled &&
+                  turnstileConfig.siteKey &&
+                  loginRole === 'super_admin' && (
+                    <div className="p-3 bg-slate-50 border border-slate-200 rounded-md space-y-1.5">
+                      <p className="text-[11px] font-medium text-slate-700">
+                        Verifikasi Anti-Bot Cloudflare Turnstile
+                      </p>
+                      <div ref={turnstileContainerRef} />
+                    </div>
+                  )}
 
                 <button
                   type="submit"
