@@ -155,8 +155,8 @@ export function Sidebar({
       </div>
 
       {/* Dynamic Registered OPD Sheets */}
-      <div className="flex-1 overflow-y-auto px-3 py-4">
-        <div className="flex items-center justify-between px-2.5 pb-2">
+      <div className="px-3 py-3 border-t border-white/10">
+        <div className="flex items-center justify-between px-2.5 pb-1.5">
           <p className="text-[11px] font-medium text-slate-400 tracking-wide">
             Sheet OPD Terdaftar
           </p>
@@ -170,39 +170,35 @@ export function Sidebar({
             Belum ada Google Sheet OPD terdaftar.
           </p>
         ) : (
-          <ul className="space-y-0.5">
+          <div className="max-h-52 overflow-y-auto space-y-1 pr-1">
             {sheets.map((s) => {
               const rowCount = rowsBySheet[s.id]?.length ?? 0;
               return (
-                <li key={s.id}>
-                  <button
-                    type="button"
-                    onClick={() => handleNavClick('data_masuk')}
-                    className="w-full flex items-center justify-between gap-2 px-2.5 py-2 text-left text-xs rounded-md text-slate-300 hover:bg-white/6 hover:text-white transition-colors"
-                  >
-                    <span className="flex items-center gap-2 min-w-0">
-                      <FileSpreadsheet
-                        className={`w-3.5 h-3.5 shrink-0 ${
-                          s.status === 'Aktif'
-                            ? 'text-teal-400'
-                            : 'text-amber-400'
-                        }`}
-                      />
-                      <span className="truncate">
-                        {s.judulDataset}
-                        <span className="block text-[10px] text-slate-400 truncate">
-                          {s.namaOpd}
-                        </span>
-                      </span>
+                <button
+                  key={s.id}
+                  type="button"
+                  onClick={() => handleNavClick('data_masuk')}
+                  className="w-full flex items-center justify-between gap-2 px-2 py-1.5 text-left text-xs rounded text-slate-300 hover:bg-white/6 hover:text-white transition-colors group"
+                >
+                  <span className="flex items-center gap-2 min-w-0">
+                    <FileSpreadsheet
+                      className={`w-3.5 h-3.5 shrink-0 ${
+                        s.status === 'Aktif'
+                          ? 'text-teal-400'
+                          : 'text-amber-400'
+                      }`}
+                    />
+                    <span className="truncate" title={`${s.judulDataset} (${s.namaOpd})`}>
+                      {s.judulDataset}
                     </span>
-                    <span className="font-mono tabular-nums text-slate-400 shrink-0">
-                      {rowCount}
-                    </span>
-                  </button>
-                </li>
+                  </span>
+                  <span className="font-mono tabular-nums text-[11px] text-slate-400 shrink-0 bg-white/5 px-1.5 py-0.5 rounded">
+                    {rowCount}
+                  </span>
+                </button>
               );
             })}
-          </ul>
+          </div>
         )}
       </div>
 
