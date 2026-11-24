@@ -190,17 +190,37 @@ export function OpdPortalWorkspace({
     );
   }, [currentSheet, sameWorkbookSheets]);
 
+  const [selectedPartitionFilter, setSelectedPartitionFilter] =
+    useState<string>('ALL');
+
   const currentRows = currentSheet ? rowsBySheet[currentSheet.id] ?? [] : [];
+
+  const availablePartitionKeys = useMemo(() => {
+    const keys = new Set<string>();
+    for (const p of currentSheet?.partitionManifest ?? []) {
+      if (p.partitionKey) keys.add(p.partitionKey);
+    }
+    for (const r of currentRows) {
+      if (r._partitionKey) keys.add(r._partitionKey);
+    }
+    return Array.from(keys).sort();
+  }, [currentSheet?.partitionManifest, currentRows]);
 
   const filteredRows = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    if (!q) return currentRows;
-    return currentRows.filter((row) =>
-      Object.values(row.values).some((val) =>
+    return currentRows.filter((row) => {
+      if (
+        selectedPartitionFilter !== 'ALL' &&
+        (row._partitionKey || 'DEFAULT') !== selectedPartitionFilter
+      ) {
+        return false;
+      }
+      if (!q) return true;
+      return Object.values(row.values).some((val) =>
         String(val).toLowerCase().includes(q)
-      )
-    );
-  }, [currentRows, searchQuery]);
+      );
+    });
+  }, [currentRows, searchQuery, selectedPartitionFilter]);
 
   const handleRegisterSheetSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1371,9 +1391,35 @@ export function OpdPortalWorkspace({
                           className="w-full h-9 pl-9 pr-3 text-sm bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
                         />
                       </div>
+                      {availablePartitionKeys.length > 1 && (
+                        <select
+                          aria-label="Filter Partisi Data"
+                          value={selectedPartitionFilter}
+                          onChange={(e) =>
+                            setSelectedPartitionFilter(e.target.value)
+                          }
+                          className="h-9 px-2.5 text-xs font-mono bg-white border border-slate-300 rounded-md text-slate-700 focus:outline-none focus:border-slate-900"
+                        >
+                          <option value="ALL">
+                            Semua Partisi ({availablePartitionKeys.length})
+                          </option>
+                          {availablePartitionKeys.map((pk) => (
+                            <option key={pk} value={pk}>
+                              Partisi: {pk}
+                            </option>
+                          ))}
+                        </select>
+                      )}
                       <span className="text-xs font-mono tabular-nums text-slate-500 whitespace-nowrap">
                         Tab: <strong className="text-slate-800">{currentSheet.sheetName}</strong> ·{' '}
-                        {filteredRows.length} baris
+                        {filteredRows.length} baris ·{' '}
+                        {(
+                          (((currentRows.length + 1) *
+                            Math.max(1, currentSheet.headers.length)) /
+                            10_000_000) *
+                          100
+                        ).toFixed(3)}
+                        % sel 10Jt
                       </span>
                     </div>
 

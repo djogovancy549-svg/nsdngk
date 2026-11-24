@@ -149,6 +149,57 @@ export interface DatasetMetadata {
 
 export type SheetStorageMode = 'google_sheet' | 'server_standalone';
 
+export type SheetPartitionStrategy =
+  | 'TIME_YEAR'
+  | 'TIME_MONTH'
+  | 'ROW_SHARD'
+  | 'SINGLE';
+
+export interface SheetPartitionManifestEntry {
+  partitionKey: string;
+  tabName: string;
+  rowCount: number;
+  cellCount: number;
+  tier: 'HOT' | 'WARM' | 'ARCHIVED_BQ';
+  lastIngestedAt: string;
+}
+
+export interface SheetBqPolicyConfig {
+  partitionStrategy: SheetPartitionStrategy;
+  maxRowsPerPartition: number;
+  workbookCellBudgetPct: number;
+  enableWriteAheadBatching: boolean;
+  batchFlushIntervalSec: number;
+  batchMaxSize: number;
+  maxWritesPerMinuteQuota: number;
+  retryMaxAttempts: number;
+  updatedAt?: string;
+}
+
+export interface SheetBqPendingSummary {
+  sheetId: string;
+  judulDataset: string;
+  partitionKey: string;
+  pendingCount: number;
+  oldestQueuedAt: string;
+}
+
+export interface SheetBqTelemetry {
+  policy: SheetBqPolicyConfig;
+  queueDepth: number;
+  writesLastMinute: number;
+  totalQueuedRows: number;
+  totalFlushedBatches: number;
+  totalFlushedRows: number;
+  totalCoalescedRows: number;
+  quotaCallsSavedPct: number;
+  rateLimitHits: number;
+  retriesSucceeded: number;
+  pendingBySheet: SheetBqPendingSummary[];
+  lastFlushAt: string | null;
+  lastError: string | null;
+}
+
 export interface OpdDynamicSheet {
   id: string;
   accountId: string;
@@ -159,6 +210,8 @@ export interface OpdDynamicSheet {
   judulDataset: string;
   deskripsi: string;
   storageMode?: SheetStorageMode;
+  partitionStrategy?: SheetPartitionStrategy;
+  partitionManifest?: SheetPartitionManifestEntry[];
   sheetUrl: string;
   sheetId: string;
   sheetName: string;
@@ -176,6 +229,7 @@ export interface OpdDynamicSheet {
 export interface DynamicSheetRow {
   _id: string;
   _rowNumber?: number;
+  _partitionKey?: string;
   _updatedAt: string;
   values: Record<string, string>;
 }

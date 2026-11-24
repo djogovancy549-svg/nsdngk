@@ -68,10 +68,10 @@ export function RunningSummaryTicker({
   return (
     <div
       aria-label="Ringkasan data berjalan"
-      className="w-full bg-[#0B1B2B] border-b border-slate-800 overflow-hidden h-9 flex items-center"
+      className="w-full bg-[#07131F] border-b border-slate-800/80 overflow-hidden h-8 flex items-center"
     >
       <div className="px-3 sm:px-4 h-full bg-teal-700 text-white text-[11px] font-semibold tracking-wide flex items-center shrink-0 whitespace-nowrap z-10">
-        Ringkasan Data
+        Info Data Daerah
       </div>
       <div className="flex-1 overflow-hidden">
         <div className="animate-marquee">

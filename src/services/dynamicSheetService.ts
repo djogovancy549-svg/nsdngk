@@ -1,6 +1,10 @@
 import {
   DynamicSheetRow,
   OpdDynamicSheet,
+  SheetBqPolicyConfig,
+  SheetBqTelemetry,
+  SheetPartitionManifestEntry,
+  SheetPartitionStrategy,
   SyncSource,
 } from '../types/satuData';
 
@@ -121,9 +125,152 @@ export interface FetchDynamicSheetResult {
   headers: string[];
   rows: DynamicSheetRow[];
   availableTabs?: string[];
+  partitions?: SheetPartitionManifestEntry[];
+  totalWorkbookCells?: number;
   source: SyncSource;
   syncedAt: string;
   message: string;
+}
+
+export function derivePartitionKeyFromRow(
+  strategy: SheetPartitionStrategy,
+  values: Record<string, string>,
+  fallbackDate?: string
+): string {
+  if (strategy === 'SINGLE') return 'DEFAULT';
+  if (strategy === 'ROW_SHARD') return 'SHARD';
+
+  const now = new Date();
+  const fallbackYear =
+    fallbackDate && /^\d{4}/.test(fallbackDate)
+      ? fallbackDate.slice(0, 4)
+      : String(now.getFullYear());
+  const fallbackMonth =
+    fallbackDate && /^\d{4}-\d{2}/.test(fallbackDate)
+      ? fallbackDate.slice(0, 7).replace('-', '_')
+      : `${now.getFullYear()}_${String(now.getMonth() + 1).padStart(2, '0')}`;
+
+  for (const [key, rawVal] of Object.entries(values || {})) {
+    const lowerKey = key.toLowerCase();
+    const val = String(rawVal || '').trim();
+    if (!val) continue;
+
+    if (lowerKey.includes('tahun') || lowerKey === 'year' || lowerKey === 'periode') {
+      const m = val.match(/\b(19|20)\d{2}\b/);
+      if (m) {
+        return strategy === 'TIME_YEAR'
+          ? m[0]
+          : `${m[0]}_${String(now.getMonth() + 1).padStart(2, '0')}`;
+      }
+    }
+    if (lowerKey.includes('tanggal') || lowerKey.includes('tgl') || lowerKey.includes('date')) {
+      const iso = val.match(/\b((?:19|20)\d{2})[-/](\d{1,2})/);
+      if (iso) {
+        return strategy === 'TIME_YEAR' ? iso[1] : `${iso[1]}_${iso[2].padStart(2, '0')}`;
+      }
+    }
+  }
+  return strategy === 'TIME_YEAR' ? fallbackYear : fallbackMonth;
+}
+
+export async function fetchSheetBqStatus(): Promise<SheetBqTelemetry | null> {
+  try {
+    const res = await fetch('/api/sheets/bq-pattern/status', {
+      method: 'GET',
+      cache: 'no-store',
+    });
+    const ct = res.headers.get('content-type') || '';
+    if (res.ok && ct.includes('application/json')) {
+      const data = await res.json();
+      if (data?.ok && data?.telemetry) {
+        return data.telemetry as SheetBqTelemetry;
+      }
+    }
+  } catch {
+    // Abaikan jika server tidak terjangkau
+  }
+  return null;
+}
+
+export async function updateSheetBqPolicy(
+  actorEmail: string,
+  policy: Partial<SheetBqPolicyConfig>
+): Promise<{
+  ok: boolean;
+  policy?: SheetBqPolicyConfig;
+  telemetry?: SheetBqTelemetry;
+  message: string;
+}> {
+  try {
+    const res = await fetch('/api/sheets/bq-pattern/policy', {
+      method: 'PUT',
+      credentials: 'same-origin',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-superadmin-email': actorEmail.trim().toLowerCase(),
+      },
+      body: JSON.stringify(policy),
+    });
+    const ct = res.headers.get('content-type') || '';
+    if (ct.includes('application/json')) {
+      const data = await res.json();
+      return {
+        ok: Boolean(res.ok && data?.ok),
+        policy: data?.policy,
+        telemetry: data?.telemetry,
+        message:
+          data?.message ||
+          (res.ok
+            ? 'Kebijakan pola BigQuery Google Sheet diperbarui.'
+            : 'Gagal menyimpan kebijakan pola BigQuery.'),
+      };
+    }
+  } catch {
+    // Fallback pesan di bawah
+  }
+  return {
+    ok: false,
+    message: 'Server tidak merespons saat memperbarui kebijakan pola BigQuery.',
+  };
+}
+
+export async function flushSheetBqQueue(sheetId?: string): Promise<{
+  ok: boolean;
+  flushedBatches: number;
+  flushedRows: number;
+  remainingQueue: number;
+  telemetry?: SheetBqTelemetry;
+  message: string;
+}> {
+  try {
+    const res = await fetch('/api/sheets/bq-pattern/flush', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(sheetId ? { sheetId } : {}),
+    });
+    const ct = res.headers.get('content-type') || '';
+    if (ct.includes('application/json')) {
+      const data = await res.json();
+      return {
+        ok: Boolean(res.ok && data?.ok),
+        flushedBatches: Number(data?.flushedBatches || 0),
+        flushedRows: Number(data?.flushedRows || 0),
+        remainingQueue: Number(data?.remainingQueue || 0),
+        telemetry: data?.telemetry,
+        message: data?.message || 'Flush antrean batch selesai.',
+      };
+    }
+  } catch {
+    // Fallback
+  }
+  return {
+    ok: false,
+    flushedBatches: 0,
+    flushedRows: 0,
+    remainingQueue: 0,
+    message: 'Gagal menghubungi server untuk flush antrean batch Google Sheet.',
+  };
 }
 
 export interface SovereignStoreSnapshot {
@@ -256,7 +403,8 @@ export async function deleteSheetFromSovereignServer(
  *   5. Fallback ke cache lokal browser
  */
 export async function fetchDynamicSheetData(
-  sheet: OpdDynamicSheet
+  sheet: OpdDynamicSheet,
+  options?: { partitionKey?: string; fields?: string[] }
 ): Promise<FetchDynamicSheetResult> {
   const now = new Date().toISOString();
 
@@ -289,7 +437,7 @@ export async function fetchDynamicSheetData(
     };
   }
 
-  // 1. Utamakan Secure Backend Proxy (/api/sheets/proxy) — menyisipkan API_SECRET server + Smart Cache 45 detik
+  // 1. Utamakan Secure Backend Proxy (/api/sheets/proxy) — Smart Cache 45 dtk + Chunked Pagination & Partition Pruning ala BigQuery
   if (sheet.webhookUrl && sheet.webhookUrl.startsWith('https://script.google.com/')) {
     try {
       const proxyRes = await fetch('/api/sheets/proxy', {
@@ -301,6 +449,8 @@ export async function fetchDynamicSheetData(
           webhookUrl: sheet.webhookUrl,
           sheetName: sheet.sheetName || '',
           action: 'list',
+          partition: options?.partitionKey || 'all',
+          fields: options?.fields?.join(',') || '',
         }),
       });
 
@@ -317,9 +467,23 @@ export async function fetchDynamicSheetData(
                 .map((t) => String(t).trim())
                 .filter(Boolean)
             : undefined;
+          const partitions = Array.isArray(json.partitions)
+            ? (json.partitions as SheetPartitionManifestEntry[])
+            : undefined;
+          const totalWorkbookCells =
+            typeof json.totalWorkbookCells === 'number'
+              ? json.totalWorkbookCells
+              : undefined;
           const rawRows = Array.isArray(json.data) ? json.data : [];
           const rows: DynamicSheetRow[] = rawRows.map(
-            (item: { _rowNumber?: number; values?: Record<string, unknown> }, idx: number) => {
+            (
+              item: {
+                _rowNumber?: number;
+                _partitionKey?: string;
+                values?: Record<string, unknown>;
+              },
+              idx: number
+            ) => {
               const vals: Record<string, string> = {};
               headers.forEach((h) => {
                 vals[h] = String(item?.values?.[h] ?? '');
@@ -327,6 +491,7 @@ export async function fetchDynamicSheetData(
               return {
                 _id: `${sheet.id}-r${item._rowNumber ?? idx + 2}`,
                 _rowNumber: item._rowNumber ?? idx + 2,
+                _partitionKey: item._partitionKey || undefined,
                 _updatedAt: now.slice(0, 10),
                 values: vals,
               };
@@ -338,13 +503,19 @@ export async function fetchDynamicSheetData(
           const cacheTag = envelope?.cached
             ? `Cache Server ${envelope.latencyMs ?? 1} ms`
             : `Proxy Aman ${envelope.latencyMs ?? 0} ms`;
+          const partitionNote =
+            partitions && partitions.length > 1
+              ? ` · ${partitions.length} partisi`
+              : '';
           return {
             headers,
             rows,
             availableTabs,
+            partitions,
+            totalWorkbookCells,
             source: 'webhook',
             syncedAt: now,
-            message: `Tersinkron melalui ${cacheTag} untuk Sheet "${sheet.sheetName}" (${headers.length} kolom, ${rows.length} baris).`,
+            message: `Tersinkron melalui ${cacheTag} untuk Sheet "${sheet.sheetName}" (${headers.length} kolom, ${rows.length} baris${partitionNote}).`,
           };
         }
       }
@@ -515,7 +686,41 @@ export async function sendDynamicRowMutation(
     };
   }
 
-  // 1. Kirim melalui Secure Backend Proxy (/api/sheets/proxy) — otomatis sisipkan API_SECRET & bersihkan cache terkait
+  // 1. Kirim melalui Engine Write-Ahead Micro-Batch & Partition Routing (/api/sheets/bq-pattern/enqueue)
+  //    Commit seketika ke Server Sovereign Store (0ms durabilitas) lalu di-batch aman kuota ke partisi Google Sheet
+  try {
+    const enqueueRes = await fetch('/api/sheets/bq-pattern/enqueue', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({
+        sheetId: sheet.id,
+        judulDataset: sheet.judulDataset,
+        webhookUrl: sheet.webhookUrl,
+        sheetName: sheet.sheetName,
+        action,
+        row,
+      }),
+    });
+
+    const ct = enqueueRes.headers.get('content-type') || '';
+    if (enqueueRes.ok && ct.includes('application/json')) {
+      const data = await enqueueRes.json();
+      if (data?.ok) {
+        return {
+          syncedToSheet: true,
+          rowNumber: data?.rowNumber ? Number(data.rowNumber) : row._rowNumber,
+          message:
+            data?.message ||
+            `Data berhasil diproses melalui antrean Micro-Batch pola BigQuery ke partisi "${data?.partitionKey || 'aktif'}" Google Sheet.`,
+        };
+      }
+    }
+  } catch {
+    // Fallback ke proxy langsung jika endpoint bq-pattern belum terjangkau
+  }
+
+  // 1b. Fallback melalui Secure Backend Proxy (/api/sheets/proxy)
   try {
     const proxyRes = await fetch('/api/sheets/proxy', {
       method: 'POST',
@@ -528,6 +733,7 @@ export async function sendDynamicRowMutation(
         action,
         payload: {
           rowNumber: row._rowNumber,
+          partitionKey: row._partitionKey,
           values: row.values,
         },
       }),

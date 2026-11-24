@@ -128,36 +128,44 @@ export function isPlaceholderEndpoint(url: string): boolean {
 }
 
 /**
- * TEMPLATE UNIVERSAL DINAMIS GOOGLE APPS SCRIPT (Code.gs)
- * -------------------------------------------------------
+ * TEMPLATE UNIVERSAL DINAMIS GOOGLE APPS SCRIPT (Code.gs v2 — Pola BigQuery)
+ * ---------------------------------------------------------------------------
  * Dicangkokkan oleh Super Admin ke Extensions > Apps Script pada Google Sheet
- * milik masing-masing OPD. Skrip ini otomatis membaca HEADER BARIS 1 yang dibuat
- * sendiri oleh OPD, sehingga formulir dan tabel web terbentuk secara dinamis.
+ * milik masing-masing OPD. Mendukung:
+ * - Auto-Partitioning per Tahun / Bulan / Shard Baris (menghindari tab raksasa)
+ * - Registry Manifest (_BQ_MANIFEST) + Penjaga Batas 10 Juta Sel Google Sheet
+ * - Batch Append via setValues() + LockService (hemat kuota & anti-timeout)
+ * - Chunked Pagination Scan (offset/limit) & Column Projection (fields)
  */
 export const APPS_SCRIPT_DYNAMIC_SHEET_TEMPLATE = `/**
- * Webhook Universal Dinamis — Satu Data Sektoral (Code.gs)
+ * Webhook Universal Dinamis Pola BigQuery — Satu Data Sektoral (Code.gs v2)
  * Dicangkokkan pada Google Spreadsheet milik OPD (Extensions > Apps Script).
- * Otomatis mengikuti header baris 1 yang dibuat oleh OPD itu sendiri.
  *
  * KEAMANAN KETAT (DISARANKAN):
- * Salin Kunci Rahasia Webhook (API_SECRET) dari menu Pengaturan > Keamanan Proxy Server
- * lalu tempel di konstanta API_SECRET di bawah ini. Jika diisi, hanya server resmi
- * kabupaten Anda yang dapat membaca/menulis Google Sheet ini.
+ * Salin Kunci Rahasia Webhook (API_SECRET) dari menu Konfigurasi > Proxy Aman
+ * lalu tempel di konstanta API_SECRET di bawah ini.
  */
 const API_SECRET = '';
+const MANIFEST_SHEET_NAME = '_BQ_MANIFEST';
+const MAX_ROWS_PER_PARTITION = 25000;
+const SAFE_WORKBOOK_CELL_LIMIT = 8000000; // Batas aman 80% dari 10.000.000 sel Google Sheet
+const DEFAULT_CHUNK_LIMIT = 1500;
 
 function isSecretValid(provided) {
   if (!API_SECRET) return true;
   return String(provided || '') === String(API_SECRET);
 }
 
-function getTargetSheet(sheetName) {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
+function getBaseSheet(ss, sheetName) {
   if (sheetName) {
     const named = ss.getSheetByName(sheetName);
     if (named) return named;
   }
-  return ss.getSheets()[0];
+  const sheets = ss.getSheets();
+  for (let i = 0; i < sheets.length; i++) {
+    if (sheets[i].getName() !== MANIFEST_SHEET_NAME) return sheets[i];
+  }
+  return sheets[0];
 }
 
 function jsonOut(payload) {
@@ -167,6 +175,7 @@ function jsonOut(payload) {
 }
 
 function readHeaders(sheet) {
+  if (!sheet) return [];
   const lastCol = sheet.getLastColumn();
   if (lastCol === 0) return [];
   return sheet.getRange(1, 1, 1, lastCol).getValues()[0]
@@ -174,69 +183,337 @@ function readHeaders(sheet) {
     .filter(function(h) { return h !== ''; });
 }
 
+function countWorkbookCells(ss) {
+  const sheets = ss.getSheets();
+  let total = 0;
+  for (let i = 0; i < sheets.length; i++) {
+    const s = sheets[i];
+    total += Math.max(1, s.getLastRow()) * Math.max(1, s.getLastColumn());
+  }
+  return total;
+}
+
+function ensureManifestSheet(ss) {
+  let m = ss.getSheetByName(MANIFEST_SHEET_NAME);
+  if (!m) {
+    m = ss.insertSheet(MANIFEST_SHEET_NAME);
+    m.appendRow([
+      'base_sheet',
+      'partition_key',
+      'tab_name',
+      'row_count',
+      'cell_count',
+      'tier',
+      'last_ingested_at'
+    ]);
+    m.setFrozenRows(1);
+    try { m.hideSheet(); } catch (e) {}
+  }
+  return m;
+}
+
+function upsertManifestRow(ss, baseSheetName, partitionKey, tabName, rowCount, colCount, tier) {
+  const m = ensureManifestSheet(ss);
+  const lastRow = m.getLastRow();
+  const nowIso = new Date().toISOString();
+  const cellCount = (rowCount + 1) * Math.max(1, colCount);
+  const record = [baseSheetName, partitionKey, tabName, rowCount, cellCount, tier || 'HOT', nowIso];
+
+  if (lastRow > 1) {
+    const existing = m.getRange(2, 1, lastRow - 1, 7).getValues();
+    for (let i = 0; i < existing.length; i++) {
+      if (String(existing[i][2]) === tabName) {
+        m.getRange(i + 2, 1, 1, 7).setValues([record]);
+        return;
+      }
+    }
+  }
+  m.appendRow(record);
+}
+
+function listWorkbookPartitions(ss, baseSheetName) {
+  const sheets = ss.getSheets();
+  const prefix = baseSheetName + '__';
+  const partitions = [];
+
+  for (let i = 0; i < sheets.length; i++) {
+    const s = sheets[i];
+    const name = s.getName();
+    if (name === MANIFEST_SHEET_NAME) continue;
+    if (name === baseSheetName || name.indexOf(prefix) === 0) {
+      const rCount = Math.max(0, s.getLastRow() - 1);
+      const cCount = Math.max(1, s.getLastColumn());
+      const pKey = name === baseSheetName ? 'DEFAULT' : name.slice(prefix.length);
+      partitions.push({
+        partitionKey: pKey,
+        tabName: name,
+        rowCount: rCount,
+        cellCount: (rCount + 1) * cCount,
+        tier: 'HOT'
+      });
+    }
+  }
+  return partitions;
+}
+
+function resolveWritePartitionSheet(ss, baseSheet, baseHeaders, partitionMode, partitionKey, maxRowsLimit) {
+  const limit = Number(maxRowsLimit) > 0 ? Number(maxRowsLimit) : MAX_ROWS_PER_PARTITION;
+  const cleanKey = String(partitionKey || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32);
+
+  // Jika mode SINGLE atau tidak ada partitionKey, gunakan baseSheet dengan guard shard rollover
+  if (!cleanKey || partitionMode === 'SINGLE') {
+    const currentRows = Math.max(0, baseSheet.getLastRow() - 1);
+    if (currentRows < limit) {
+      return { sheet: baseSheet, partitionKey: 'DEFAULT', headers: baseHeaders };
+    }
+  }
+
+  const baseName = baseSheet.getName();
+  const desiredKey = cleanKey || String(new Date().getFullYear());
+  let shardIndex = 1;
+  let candidateName = baseName + '__' + desiredKey;
+
+  while (shardIndex <= 20) {
+    let target = ss.getSheetByName(candidateName);
+    if (!target) {
+      const totalCells = countWorkbookCells(ss);
+      if (totalCells >= SAFE_WORKBOOK_CELL_LIMIT) {
+        throw new Error('Kapasitas aman Google Sheet (8.000.000 sel) tercapai. Arsipkan partisi lama ke BigQuery/Server terlebih dahulu.');
+      }
+      target = ss.insertSheet(candidateName);
+      if (baseHeaders.length > 0) {
+        target.getRange(1, 1, 1, baseHeaders.length).setValues([baseHeaders]);
+        target.setFrozenRows(1);
+      }
+      upsertManifestRow(ss, baseName, shardIndex === 1 ? desiredKey : desiredKey + '_P' + shardIndex, candidateName, 0, baseHeaders.length, 'HOT');
+      return {
+        sheet: target,
+        partitionKey: shardIndex === 1 ? desiredKey : desiredKey + '_P' + shardIndex,
+        headers: baseHeaders
+      };
+    }
+
+    const rowCount = Math.max(0, target.getLastRow() - 1);
+    if (rowCount < limit) {
+      let targetHeaders = readHeaders(target);
+      if (targetHeaders.length === 0 && baseHeaders.length > 0) {
+        target.getRange(1, 1, 1, baseHeaders.length).setValues([baseHeaders]);
+        targetHeaders = baseHeaders;
+      }
+      return {
+        sheet: target,
+        partitionKey: shardIndex === 1 ? desiredKey : desiredKey + '_P' + shardIndex,
+        headers: targetHeaders
+      };
+    }
+
+    shardIndex++;
+    candidateName = baseName + '__' + desiredKey + '_P' + shardIndex;
+  }
+
+  throw new Error('Melebihi batas shard partisi maksimum untuk key: ' + desiredKey);
+}
+
+function readSheetChunk(sheet, headers, offset, limit, selectedFields, partitionKey) {
+  const lastRow = sheet.getLastRow();
+  const lastCol = headers.length;
+  if (lastRow <= 1 || lastCol === 0) {
+    return { rows: [], totalRows: 0, hasMore: false, nextOffset: 0 };
+  }
+
+  const totalRows = lastRow - 1;
+  const safeOffset = Math.max(0, Number(offset) || 0);
+  const safeLimit = Math.min(3000, Math.max(1, Number(limit) || DEFAULT_CHUNK_LIMIT));
+  if (safeOffset >= totalRows) {
+    return { rows: [], totalRows: totalRows, hasMore: false, nextOffset: totalRows };
+  }
+
+  const count = Math.min(safeLimit, totalRows - safeOffset);
+  const rawValues = sheet.getRange(2 + safeOffset, 1, count, lastCol).getDisplayValues();
+  const activeFields = selectedFields && selectedFields.length > 0 ? selectedFields : headers;
+  const fieldIndexMap = {};
+  for (let c = 0; c < headers.length; c++) {
+    fieldIndexMap[headers[c]] = c;
+  }
+
+  const rows = [];
+  for (let i = 0; i < rawValues.length; i++) {
+    const rowArr = rawValues[i];
+    const hasContent = rowArr.some(function(cell) { return cell !== '' && cell !== null; });
+    if (!hasContent) continue;
+
+    const valuesObj = {};
+    for (let f = 0; f < activeFields.length; f++) {
+      const colName = activeFields[f];
+      const idx = fieldIndexMap[colName];
+      if (idx !== undefined) {
+        valuesObj[colName] = rowArr[idx] !== undefined && rowArr[idx] !== null ? String(rowArr[idx]) : '';
+      }
+    }
+
+    rows.push({
+      _rowNumber: 2 + safeOffset + i,
+      _partitionKey: partitionKey || 'DEFAULT',
+      values: valuesObj
+    });
+  }
+
+  const nextOffset = safeOffset + count;
+  return {
+    rows: rows,
+    totalRows: totalRows,
+    hasMore: nextOffset < totalRows,
+    nextOffset: nextOffset
+  };
+}
+
 function doGet(e) {
   try {
-    const providedSecret = (e && e.parameter && e.parameter.secret) || '';
-    if (!isSecretValid(providedSecret)) {
+    const params = (e && e.parameter) || {};
+    if (!isSecretValid(params.secret || '')) {
       return jsonOut({ ok: false, error: 'Akses ditolak: API_SECRET tidak valid.' });
     }
+
     const ss = SpreadsheetApp.getActiveSpreadsheet();
-    const action = (e && e.parameter && e.parameter.action) || 'list';
-    const sheetName = (e && e.parameter && e.parameter.sheet) || '';
-    const availableSheets = ss.getSheets().map(function(s) { return s.getName(); });
-    const sheet = getTargetSheet(sheetName);
-    const headers = readHeaders(sheet);
+    const action = params.action || 'list';
+    const sheetName = params.sheet || '';
+    const availableSheets = ss.getSheets()
+      .map(function(s) { return s.getName(); })
+      .filter(function(n) { return n !== MANIFEST_SHEET_NAME && n.indexOf('__') === -1; });
+    const baseSheet = getBaseSheet(ss, sheetName);
+    const headers = readHeaders(baseSheet);
+    const partitions = listWorkbookPartitions(ss, baseSheet.getName());
+    const totalWorkbookCells = countWorkbookCells(ss);
 
-    if (action === 'ping' || action === 'schema' || action === 'listSheets') {
+    if (action === 'ping' || action === 'schema' || action === 'listSheets' || action === 'manifest') {
+      const totalPartitionRows = partitions.reduce(function(acc, p) { return acc + p.rowCount; }, 0);
       return jsonOut({
         ok: true,
         spreadsheet: ss.getName(),
-        sheet: sheet.getName(),
+        sheet: baseSheet.getName(),
         availableSheets: availableSheets,
         headers: headers,
-        rows: Math.max(0, sheet.getLastRow() - 1)
+        rows: totalPartitionRows,
+        partitions: partitions,
+        totalWorkbookCells: totalWorkbookCells,
+        safeCellLimit: SAFE_WORKBOOK_CELL_LIMIT
       });
     }
 
-    const lastRow = sheet.getLastRow();
-    const lastCol = headers.length;
-    if (lastRow <= 1 || lastCol === 0) {
-      return jsonOut({
-        ok: true,
-        spreadsheet: ss.getName(),
-        sheet: sheet.getName(),
-        availableSheets: availableSheets,
-        headers: headers,
-        data: []
-      });
-    }
+    const requestedPartition = String(params.partition || '').trim();
+    const offset = Number(params.offset || 0);
+    const limit = Number(params.limit || DEFAULT_CHUNK_LIMIT);
+    const fieldsParam = String(params.fields || '').trim();
+    const selectedFields = fieldsParam
+      ? fieldsParam.split(',').map(function(f) { return f.trim(); }).filter(Boolean)
+      : [];
 
-    const rawValues = sheet.getRange(2, 1, lastRow - 1, lastCol).getDisplayValues();
-    const rows = [];
-
-    for (let i = 0; i < rawValues.length; i++) {
-      const rowArr = rawValues[i];
-      const hasContent = rowArr.some(function(cell) { return cell !== '' && cell !== null; });
-      if (!hasContent) continue;
-
-      const valuesObj = {};
-      for (let c = 0; c < headers.length; c++) {
-        valuesObj[headers[c]] = rowArr[c] !== undefined && rowArr[c] !== null ? String(rowArr[c]) : '';
+    // Jika meminta partisi spesifik (Partition Pruning)
+    if (requestedPartition && requestedPartition.toUpperCase() !== 'ALL') {
+      const prefix = baseSheet.getName() + '__';
+      const targetTabName = requestedPartition === 'DEFAULT'
+        ? baseSheet.getName()
+        : (requestedPartition.indexOf(prefix) === 0 ? requestedPartition : prefix + requestedPartition);
+      const partSheet = ss.getSheetByName(targetTabName);
+      if (!partSheet) {
+        return jsonOut({
+          ok: true,
+          spreadsheet: ss.getName(),
+          sheet: baseSheet.getName(),
+          availableSheets: availableSheets,
+          headers: headers,
+          data: [],
+          totalRows: 0,
+          hasMore: false,
+          nextOffset: 0,
+          partitions: partitions,
+          totalWorkbookCells: totalWorkbookCells
+        });
       }
-
-      rows.push({
-        _rowNumber: i + 2,
-        values: valuesObj
+      const pHeaders = readHeaders(partSheet);
+      const effectiveHeaders = pHeaders.length > 0 ? pHeaders : headers;
+      const chunk = readSheetChunk(partSheet, effectiveHeaders, offset, limit, selectedFields, requestedPartition);
+      return jsonOut({
+        ok: true,
+        spreadsheet: ss.getName(),
+        sheet: baseSheet.getName(),
+        activePartition: requestedPartition,
+        availableSheets: availableSheets,
+        headers: effectiveHeaders,
+        data: chunk.rows,
+        totalRows: chunk.totalRows,
+        hasMore: chunk.hasMore,
+        nextOffset: chunk.nextOffset,
+        partitions: partitions,
+        totalWorkbookCells: totalWorkbookCells
       });
     }
+
+    // Jika meminta gabungan partisi ('all') atau default sheet dengan fallback otomatis ke partisi aktif terbaru
+    const nonEmptyPartitions = partitions.filter(function(p) { return p.rowCount > 0; });
+    if (requestedPartition.toUpperCase() === 'ALL' && nonEmptyPartitions.length > 0) {
+      let mergedRows = [];
+      let totalAllRows = 0;
+      for (let p = 0; p < nonEmptyPartitions.length; p++) {
+        const pInfo = nonEmptyPartitions[p];
+        const pSheet = ss.getSheetByName(pInfo.tabName);
+        if (!pSheet) continue;
+        const pHeaders = readHeaders(pSheet);
+        const effHeaders = pHeaders.length > 0 ? pHeaders : headers;
+        const pChunk = readSheetChunk(pSheet, effHeaders, 0, Math.min(limit, 3000), selectedFields, pInfo.partitionKey);
+        totalAllRows += pChunk.totalRows;
+        mergedRows = mergedRows.concat(pChunk.rows);
+      }
+      return jsonOut({
+        ok: true,
+        spreadsheet: ss.getName(),
+        sheet: baseSheet.getName(),
+        availableSheets: availableSheets,
+        headers: headers,
+        data: mergedRows,
+        totalRows: totalAllRows,
+        hasMore: false,
+        nextOffset: totalAllRows,
+        partitions: partitions,
+        totalWorkbookCells: totalWorkbookCells
+      });
+    }
+
+    // Default single/chunked read pada baseSheet (atau partisi terbaru jika baseSheet kosong)
+    let readTarget = baseSheet;
+    let activePartKey = 'DEFAULT';
+    if (baseSheet.getLastRow() <= 1 && nonEmptyPartitions.length > 0) {
+      const latestPart = nonEmptyPartitions[nonEmptyPartitions.length - 1];
+      const latestSheet = ss.getSheetByName(latestPart.tabName);
+      if (latestSheet) {
+        readTarget = latestSheet;
+        activePartKey = latestPart.partitionKey;
+      }
+    }
+
+    const effHeaders = readHeaders(readTarget);
+    const chunk = readSheetChunk(
+      readTarget,
+      effHeaders.length > 0 ? effHeaders : headers,
+      offset,
+      limit,
+      selectedFields,
+      activePartKey
+    );
 
     return jsonOut({
       ok: true,
       spreadsheet: ss.getName(),
-      sheet: sheet.getName(),
+      sheet: baseSheet.getName(),
+      activePartition: activePartKey,
       availableSheets: availableSheets,
-      headers: headers,
-      data: rows
+      headers: headers.length > 0 ? headers : effHeaders,
+      data: chunk.rows,
+      totalRows: chunk.totalRows,
+      hasMore: chunk.hasMore,
+      nextOffset: chunk.nextOffset,
+      partitions: partitions,
+      totalWorkbookCells: totalWorkbookCells
     });
   } catch (err) {
     return jsonOut({ ok: false, error: String(err) });
@@ -244,58 +521,214 @@ function doGet(e) {
 }
 
 function doPost(e) {
+  const lock = LockService.getScriptLock();
   try {
+    lock.waitLock(15000);
     const body = JSON.parse(e.postData.contents);
     if (!isSecretValid(body.secret)) {
       return jsonOut({ ok: false, error: 'Akses ditolak: API_SECRET tidak valid.' });
     }
-    const action = body.action;
-    const sheet = getTargetSheet(body.sheetName || '');
-    const headers = readHeaders(sheet);
 
-    if (headers.length === 0) {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const action = body.action;
+    const baseSheet = getBaseSheet(ss, body.sheetName || '');
+    const baseHeaders = readHeaders(baseSheet);
+
+    if (baseHeaders.length === 0) {
       return jsonOut({ ok: false, error: 'Baris 1 (Header) pada Google Sheet masih kosong.' });
     }
 
+    const partitionMode = body.partitionMode || 'SINGLE';
+    const maxRowsPerPartition = Number(body.maxRowsPerPartition || MAX_ROWS_PER_PARTITION);
+
+    // 1. MICRO-BATCH MUTATE (Pola BigQuery Streaming Insert — 1x setValues untuk banyak baris)
+    if (action === 'batchMutate' && Array.isArray(body.ops)) {
+      const ops = body.ops;
+      const createsByPartition = {};
+      let createdCount = 0;
+      let updatedCount = 0;
+      let deletedCount = 0;
+      const assignedRowNumbers = [];
+
+      for (let i = 0; i < ops.length; i++) {
+        const op = ops[i];
+        const opAction = op.action || 'create';
+        const pKey = String(op.partitionKey || body.partitionKey || '').trim();
+
+        if (opAction === 'create') {
+          const groupKey = partitionMode === 'SINGLE' ? 'SINGLE' : (pKey || String(new Date().getFullYear()));
+          if (!createsByPartition[groupKey]) createsByPartition[groupKey] = [];
+          createsByPartition[groupKey].push(op);
+        } else if (opAction === 'update') {
+          const targetInfo = partitionMode === 'SINGLE'
+            ? { sheet: baseSheet, partitionKey: 'DEFAULT', headers: baseHeaders }
+            : resolveWritePartitionSheet(ss, baseSheet, baseHeaders, partitionMode, pKey, maxRowsPerPartition);
+          const rowNumber = Number(op.rowNumber);
+          if (rowNumber >= 2 && rowNumber <= targetInfo.sheet.getLastRow()) {
+            const rowData = op.values || {};
+            const updatedRow = targetInfo.headers.map(function(h) {
+              return rowData[h] !== undefined ? rowData[h] : '';
+            });
+            targetInfo.sheet.getRange(rowNumber, 1, 1, targetInfo.headers.length).setValues([updatedRow]);
+            updatedCount++;
+          }
+        } else if (opAction === 'delete') {
+          const targetInfo = partitionMode === 'SINGLE'
+            ? { sheet: baseSheet, partitionKey: 'DEFAULT', headers: baseHeaders }
+            : resolveWritePartitionSheet(ss, baseSheet, baseHeaders, partitionMode, pKey, maxRowsPerPartition);
+          const rowNumber = Number(op.rowNumber);
+          if (rowNumber >= 2 && rowNumber <= targetInfo.sheet.getLastRow()) {
+            targetInfo.sheet.deleteRow(rowNumber);
+            deletedCount++;
+          }
+        }
+      }
+
+      const partKeys = Object.keys(createsByPartition);
+      for (let k = 0; k < partKeys.length; k++) {
+        const groupKey = partKeys[k];
+        const groupOps = createsByPartition[groupKey];
+        const resolved = resolveWritePartitionSheet(
+          ss,
+          baseSheet,
+          baseHeaders,
+          partitionMode,
+          groupKey === 'SINGLE' ? '' : groupKey,
+          maxRowsPerPartition
+        );
+        const startRow = Math.max(2, resolved.sheet.getLastRow() + 1);
+        const matrix = groupOps.map(function(op) {
+          const rowData = op.values || {};
+          return resolved.headers.map(function(h) {
+            return rowData[h] !== undefined ? rowData[h] : '';
+          });
+        });
+
+        resolved.sheet.getRange(startRow, 1, matrix.length, resolved.headers.length).setValues(matrix);
+        createdCount += matrix.length;
+        for (let r = 0; r < matrix.length; r++) {
+          assignedRowNumbers.push({ partitionKey: resolved.partitionKey, rowNumber: startRow + r });
+        }
+
+        upsertManifestRow(
+          ss,
+          baseSheet.getName(),
+          resolved.partitionKey,
+          resolved.sheet.getName(),
+          Math.max(0, resolved.sheet.getLastRow() - 1),
+          resolved.headers.length,
+          'HOT'
+        );
+      }
+
+      return jsonOut({
+        ok: true,
+        action: 'batchMutate',
+        createdCount: createdCount,
+        updatedCount: updatedCount,
+        deletedCount: deletedCount,
+        assignedRowNumbers: assignedRowNumbers,
+        totalWorkbookCells: countWorkbookCells(ss)
+      });
+    }
+
+    // 2. SINGLE CREATE (Partition-aware)
     if (action === 'create') {
+      const resolved = resolveWritePartitionSheet(
+        ss,
+        baseSheet,
+        baseHeaders,
+        partitionMode,
+        body.partitionKey || '',
+        maxRowsPerPartition
+      );
       const rowData = body.values || {};
-      const newRow = headers.map(function(h) {
+      const newRow = resolved.headers.map(function(h) {
         return rowData[h] !== undefined ? rowData[h] : '';
       });
-      sheet.appendRow(newRow);
+      const targetRow = Math.max(2, resolved.sheet.getLastRow() + 1);
+      resolved.sheet.getRange(targetRow, 1, 1, resolved.headers.length).setValues([newRow]);
+      upsertManifestRow(
+        ss,
+        baseSheet.getName(),
+        resolved.partitionKey,
+        resolved.sheet.getName(),
+        Math.max(0, resolved.sheet.getLastRow() - 1),
+        resolved.headers.length,
+        'HOT'
+      );
       return jsonOut({
         ok: true,
         action: 'create',
-        rowNumber: sheet.getLastRow(),
-        headers: headers
+        partitionKey: resolved.partitionKey,
+        tabName: resolved.sheet.getName(),
+        rowNumber: targetRow,
+        headers: resolved.headers
       });
     }
 
     if (action === 'update') {
+      const resolved = resolveWritePartitionSheet(
+        ss,
+        baseSheet,
+        baseHeaders,
+        partitionMode,
+        body.partitionKey || '',
+        maxRowsPerPartition
+      );
       const rowNumber = Number(body.rowNumber);
       if (!rowNumber || rowNumber < 2) {
         return jsonOut({ ok: false, error: 'Nomor baris tidak valid untuk pembaruan.' });
       }
       const rowData = body.values || {};
-      const updatedRow = headers.map(function(h) {
+      const updatedRow = resolved.headers.map(function(h) {
         return rowData[h] !== undefined ? rowData[h] : '';
       });
-      sheet.getRange(rowNumber, 1, 1, headers.length).setValues([updatedRow]);
-      return jsonOut({ ok: true, action: 'update', rowNumber: rowNumber });
+      resolved.sheet.getRange(rowNumber, 1, 1, resolved.headers.length).setValues([updatedRow]);
+      return jsonOut({
+        ok: true,
+        action: 'update',
+        partitionKey: resolved.partitionKey,
+        rowNumber: rowNumber
+      });
     }
 
     if (action === 'delete') {
+      const resolved = resolveWritePartitionSheet(
+        ss,
+        baseSheet,
+        baseHeaders,
+        partitionMode,
+        body.partitionKey || '',
+        maxRowsPerPartition
+      );
       const rowNumber = Number(body.rowNumber);
       if (!rowNumber || rowNumber < 2) {
         return jsonOut({ ok: false, error: 'Nomor baris tidak valid untuk penghapusan.' });
       }
-      sheet.deleteRow(rowNumber);
-      return jsonOut({ ok: true, action: 'delete', rowNumber: rowNumber });
+      resolved.sheet.deleteRow(rowNumber);
+      upsertManifestRow(
+        ss,
+        baseSheet.getName(),
+        resolved.partitionKey,
+        resolved.sheet.getName(),
+        Math.max(0, resolved.sheet.getLastRow() - 1),
+        resolved.headers.length,
+        'HOT'
+      );
+      return jsonOut({
+        ok: true,
+        action: 'delete',
+        partitionKey: resolved.partitionKey,
+        rowNumber: rowNumber
+      });
     }
 
     return jsonOut({ ok: false, error: 'Action tidak dikenal: ' + action });
   } catch (err) {
     return jsonOut({ ok: false, error: String(err) });
+  } finally {
+    try { lock.releaseLock(); } catch (e) {}
   }
 }`;
 

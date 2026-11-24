@@ -484,87 +484,88 @@ export function AuthGateView({
   };
 
   return (
-    <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900">
+    <div className="min-h-screen flex flex-col bg-civic-grid text-slate-900">
       <RunningSummaryTicker
         accounts={accounts}
         sheets={sheets}
         rowsBySheet={rowsBySheet}
       />
 
-      <header className="bg-white border-b border-slate-200 px-4 sm:px-8 h-16 flex items-center justify-between gap-4">
-        <div className="flex items-center gap-3 min-w-0">
-          <div className="w-8 h-8 rounded-md bg-[#0B1B2B] text-white flex items-center justify-center shrink-0">
+      <header className="sticky top-0 z-30 bg-white/95 backdrop-blur-md border-b border-slate-200/80 px-4 sm:px-8 h-16 flex items-center justify-between gap-4 sm:gap-8">
+        {/* Zona 1: Wordmark Portal Resmi */}
+        <button
+          type="button"
+          onClick={() => setMode('public_catalog')}
+          className="flex items-center gap-3 min-w-0 text-left shrink-0 group"
+        >
+          <div className="w-8 h-8 rounded-lg bg-[#0B1B2B] text-white flex items-center justify-center shrink-0 transition-transform group-hover:scale-105">
             <ShieldCheck className="w-4 h-4 text-teal-400" />
           </div>
-          <span className="font-semibold text-[15px] tracking-tight text-slate-900 whitespace-nowrap truncate">
+          <span className="font-semibold text-[15px] tracking-tight text-slate-900 whitespace-nowrap">
             {regencyConfig.namaPortal}
           </span>
-        </div>
+        </button>
 
-        <div
-          className="inline-flex items-center gap-1 p-1 bg-slate-100 rounded-md shrink-0"
-          role="tablist"
-          aria-label="Mode akses portal"
+        {/* Zona 2: Tautan Navigasi Bersih */}
+        <nav
+          className="flex items-center gap-4 sm:gap-7 text-xs sm:text-sm font-medium overflow-x-auto"
+          aria-label="Navigasi utama portal"
         >
           <button
             type="button"
-            role="tab"
-            aria-selected={mode === 'login'}
-            onClick={() => {
-              setMode('login');
-              setLoginError(null);
-            }}
-            className={`px-3 py-1.5 text-xs font-medium rounded transition-colors whitespace-nowrap ${
-              mode === 'login'
-                ? 'bg-white text-slate-900 shadow-xs'
-                : 'text-slate-600 hover:text-slate-900'
+            onClick={() => setMode('public_catalog')}
+            className={`inline-flex items-center gap-1.5 py-1.5 border-b-2 transition-colors whitespace-nowrap shrink-0 ${
+              mode === 'public_catalog'
+                ? 'border-teal-700 text-slate-950 font-semibold'
+                : 'border-transparent text-slate-600 hover:text-slate-900 hover:border-slate-300'
             }`}
           >
-            Masuk Portal
+            <Globe className="w-3.5 h-3.5 hidden sm:inline" />
+            Katalog Publik
           </button>
           <button
             type="button"
-            role="tab"
-            aria-selected={mode === 'register'}
             onClick={() => {
               setMode('register');
               setRegFeedback(null);
             }}
-            className={`px-3 py-1.5 text-xs font-medium rounded transition-colors whitespace-nowrap ${
+            className={`py-1.5 border-b-2 transition-colors whitespace-nowrap shrink-0 ${
               mode === 'register'
-                ? 'bg-white text-slate-900 shadow-xs'
-                : 'text-slate-600 hover:text-slate-900'
+                ? 'border-teal-700 text-slate-950 font-semibold'
+                : 'border-transparent text-slate-600 hover:text-slate-900 hover:border-slate-300'
             }`}
           >
             Daftar Akun Dinas
           </button>
           <button
             type="button"
-            role="tab"
-            aria-selected={mode === 'public_catalog'}
-            onClick={() => setMode('public_catalog')}
-            className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded transition-colors whitespace-nowrap ${
-              mode === 'public_catalog'
-                ? 'bg-[#0B1B2B] text-white shadow-xs'
-                : 'text-slate-600 hover:text-slate-900'
+            onClick={() => setMode('guide')}
+            className={`inline-flex items-center gap-1.5 py-1.5 border-b-2 transition-colors whitespace-nowrap shrink-0 ${
+              mode === 'guide'
+                ? 'border-teal-700 text-slate-950 font-semibold'
+                : 'border-transparent text-slate-600 hover:text-slate-900 hover:border-slate-300'
             }`}
           >
-            <Globe className="w-3.5 h-3.5" />
-            Katalog Publik
+            <BookOpen className="w-3.5 h-3.5 hidden sm:inline" />
+            Panduan
           </button>
+        </nav>
+
+        {/* Zona 3: 1 Aksi Utama */}
+        <div className="shrink-0">
           <button
             type="button"
-            role="tab"
-            aria-selected={mode === 'guide'}
-            onClick={() => setMode('guide')}
-            className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded transition-colors whitespace-nowrap ${
-              mode === 'guide'
-                ? 'bg-teal-700 text-white shadow-xs'
-                : 'text-slate-600 hover:text-slate-900'
+            onClick={() => {
+              setMode('login');
+              setLoginError(null);
+            }}
+            className={`px-4 py-2 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 ${
+              mode === 'login'
+                ? 'bg-teal-700 text-white'
+                : 'bg-[#0B1B2B] text-white hover:bg-slate-800'
             }`}
           >
-            <BookOpen className="w-3.5 h-3.5" />
-            Panduan
+            Masuk Portal
           </button>
         </div>
       </header>
@@ -573,42 +574,30 @@ export function AuthGateView({
         {mode === 'public_catalog' ? (
           <PublicCatalogView
             regencyConfig={regencyConfig}
-            onGoToLogin={() => {
-              setMode('login');
-              setLoginError(null);
-            }}
+            registeredAccountsCount={accounts.length}
+            registeredSheetsCount={sheets.length}
           />
         ) : mode === 'guide' ? (
-          <PortalGuideView
-            regencyConfig={regencyConfig}
-            onGoToLogin={() => {
-              setMode('login');
-              setLoginError(null);
-            }}
-            onGoToRegister={() => {
-              setMode('register');
-              setRegFeedback(null);
-            }}
-          />
+          <PortalGuideView regencyConfig={regencyConfig} />
         ) : (
           <>
             <HeroBannerSlider />
 
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
           {/* Left: Sovereign Data Architecture Overview */}
-          <div className="lg:col-span-7 bg-white border border-slate-200 rounded-lg p-6 space-y-5">
+          <div className="lg:col-span-7 bg-white border border-slate-200/90 rounded-xl p-6 sm:p-7 space-y-6">
             <div>
               <p className="text-xs font-medium text-teal-700">
                 Pemerintah {regencyConfig.namaKabupaten} · Kedaulatan Data Sektoral OPD
               </p>
-              <h1 className="mt-1 text-2xl font-semibold tracking-tight text-slate-900">
+              <h1 className="mt-1.5 text-2xl sm:text-[28px] font-semibold tracking-tight text-slate-900 leading-snug">
                 Satu Data Dinamis Berbasis Google Drive &amp; Sheet Milik OPD
               </h1>
-              <p className="mt-2 text-sm text-slate-600 leading-relaxed">
+              <p className="mt-2.5 text-sm text-slate-600 leading-relaxed">
                 Setiap Dinas/OPD mendaftarkan akun, email resmi, tautan Folder
                 Google Drive, serta URL Google Sheet yang mereka kelola sendiri.
                 Setelah Super Admin mencangkokkan skrip{' '}
-                <code className="font-mono text-xs bg-slate-100 px-1 py-0.5 rounded">
+                <code className="font-mono text-xs bg-slate-100 px-1.5 py-0.5 rounded">
                   doPost (Code.gs)
                 </code>
                 , formulir dan tabel web terbentuk otomatis mengikuti header
@@ -616,66 +605,57 @@ export function AuthGateView({
               </p>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-4 border-t border-slate-200 text-xs">
-              <div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-5 pt-5 border-t border-slate-200/80 text-xs">
+              <div className="space-y-1.5">
+                <span className="inline-flex w-6 h-6 rounded-md bg-slate-100 text-slate-900 font-mono text-[11px] font-semibold items-center justify-center">
+                  01
+                </span>
                 <p className="font-semibold text-slate-900">
-                  01. Ajukan &amp; PIN Sekali Pakai
+                  Ajukan &amp; PIN Sekali Pakai
                 </p>
-                <p className="mt-1 text-slate-600 leading-relaxed">
+                <p className="text-slate-600 leading-relaxed">
                   Karena katalog warga sudah terbuka publik, dinas mengajukan
                   permohonan terlebih dahulu lalu Super Admin memberikan PIN
                   sekali pakai untuk membuka pendaftaran.
                 </p>
               </div>
-              <div>
+              <div className="space-y-1.5">
+                <span className="inline-flex w-6 h-6 rounded-md bg-slate-100 text-slate-900 font-mono text-[11px] font-semibold items-center justify-center">
+                  02
+                </span>
                 <p className="font-semibold text-slate-900">
-                  02. Cangkok Script Code.gs
+                  Cangkok Script Code.gs
                 </p>
-                <p className="mt-1 text-slate-600 leading-relaxed">
+                <p className="text-slate-600 leading-relaxed">
                   Super Admin mencangkokkan skrip dinamis pada Extensions sheet
                   OPD dan mengaktifkan hak akses web.
                 </p>
               </div>
-              <div>
+              <div className="space-y-1.5">
+                <span className="inline-flex w-6 h-6 rounded-md bg-slate-100 text-slate-900 font-mono text-[11px] font-semibold items-center justify-center">
+                  03
+                </span>
                 <p className="font-semibold text-slate-900">
-                  03. Form &amp; Tabel Otomatis
+                  Form &amp; Tabel Otomatis
                 </p>
-                <p className="mt-1 text-slate-600 leading-relaxed">
+                <p className="text-slate-600 leading-relaxed">
                   Form input dan tabel otomatis menyesuaikan header sheet OPD.
                   Super Admin menerima data read-only saja.
                 </p>
               </div>
             </div>
 
-            <div className="pt-4 border-t border-slate-200 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-500">
-              <span className="inline-flex items-center gap-1.5">
-                <ShieldCheck className="w-3.5 h-3.5 text-teal-700 shrink-0" />
-                Dilindungi enkripsi SHA-256, proteksi brute-force &amp; audit AI
-                keamanan siber.
+            <div className="pt-4 border-t border-slate-200/80 flex items-center gap-2 text-xs text-slate-500">
+              <ShieldCheck className="w-4 h-4 text-teal-700 shrink-0" />
+              <span>
+                Dilindungi enkripsi kata sandi acak (scrypt), proteksi
+                brute-force, serta audit keamanan siber terpusat.
               </span>
-              <div className="flex flex-wrap items-center gap-4">
-                <button
-                  type="button"
-                  onClick={() => setMode('public_catalog')}
-                  className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-900 hover:text-teal-700 underline decoration-slate-300"
-                >
-                  <Globe className="w-3.5 h-3.5 text-teal-700" />
-                  Jelajahi Katalog Publik Warga
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setMode('guide')}
-                  className="inline-flex items-center gap-1.5 text-xs font-medium text-teal-700 hover:text-teal-900 underline decoration-teal-300"
-                >
-                  <BookOpen className="w-3.5 h-3.5" />
-                  Baca Panduan
-                </button>
-              </div>
             </div>
           </div>
 
           {/* Right: Login / Register Card */}
-          <div className="lg:col-span-5 bg-white border border-slate-200 rounded-lg p-6">
+          <div className="lg:col-span-5 bg-white border border-slate-200/90 rounded-xl p-6 sm:p-7 shadow-[0_1px_2px_rgba(11,27,43,0.04),0_8px_24px_-12px_rgba(11,27,43,0.08)]">
             {mode === 'login' ? (
               <form onSubmit={handleLoginSubmit} className="space-y-4">
                 <div className="pb-3 border-b border-slate-200 space-y-3">
@@ -1363,6 +1343,26 @@ export function AuthGateView({
           </>
         )}
       </main>
+
+      <footer className="bg-white/90 backdrop-blur-xs border-t border-slate-200/80 mt-10">
+        <div className="max-w-[1280px] mx-auto px-4 sm:px-6 lg:px-8 py-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-slate-600">
+          <div className="space-y-0.5">
+            <p className="font-semibold text-slate-900">
+              {regencyConfig.namaPortal} · Pemerintah {regencyConfig.namaKabupaten}
+            </p>
+            <p className="text-slate-500">
+              Walidata: {regencyConfig.namaWalidata} · Domain resmi{' '}
+              <span className="font-mono text-slate-700">
+                {regencyConfig.domainResmi}
+              </span>
+            </p>
+          </div>
+
+          <p className="text-slate-500 whitespace-nowrap">
+            Standar Satu Data Indonesia · Perpres No. 39 Tahun 2019
+          </p>
+        </div>
+      </footer>
     </div>
   );
 }

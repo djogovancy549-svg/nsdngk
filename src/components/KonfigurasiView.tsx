@@ -34,7 +34,12 @@ import {
   saveCustomAuthSheetConfig,
   testAuthSheetConnection,
 } from '../services/authSheetService';
-import { extractGoogleSheetId } from '../services/dynamicSheetService';
+import {
+  extractGoogleSheetId,
+  fetchSheetBqStatus,
+  flushSheetBqQueue,
+  updateSheetBqPolicy,
+} from '../services/dynamicSheetService';
 import {
   clearSheetProxyCache,
   fetchSheetProxyStats,
@@ -68,6 +73,8 @@ import {
   DynamicSheetRow,
   OpdDynamicSheet,
   PublishedDatasetClone,
+  SheetBqTelemetry,
+  SheetPartitionStrategy,
 } from '../types/satuData';
 
 interface KonfigurasiViewProps {
@@ -152,6 +159,34 @@ export function KonfigurasiView({
   const [bqQueryResult, setBqQueryResult] =
     useState<BigQueryQueryResult | null>(null);
 
+  // Google Sheet BigQuery-Pattern Engine state (Partitioning, Micro-Batch & Quota Guard)
+  const [sheetBqTelemetry, setSheetBqTelemetry] =
+    useState<SheetBqTelemetry | null>(null);
+  const [sheetBqPartitionStrategy, setSheetBqPartitionStrategy] =
+    useState<SheetPartitionStrategy>('TIME_YEAR');
+  const [sheetBqMaxRows, setSheetBqMaxRows] = useState(25000);
+  const [sheetBqBatchSize, setSheetBqBatchSize] = useState(25);
+  const [sheetBqWritesPerMin, setSheetBqWritesPerMin] = useState(45);
+  const [sheetBqBatchingEnabled, setSheetBqBatchingEnabled] = useState(true);
+  const [sheetBqSaving, setSheetBqSaving] = useState(false);
+  const [sheetBqFlushing, setSheetBqFlushing] = useState(false);
+  const [sheetBqNotice, setSheetBqNotice] = useState<{
+    type: 'success' | 'error';
+    text: string;
+  } | null>(null);
+
+  const loadSheetBqTelemetry = async () => {
+    const telemetry = await fetchSheetBqStatus();
+    if (telemetry) {
+      setSheetBqTelemetry(telemetry);
+      setSheetBqPartitionStrategy(telemetry.policy.partitionStrategy);
+      setSheetBqMaxRows(telemetry.policy.maxRowsPerPartition);
+      setSheetBqBatchSize(telemetry.policy.batchMaxSize);
+      setSheetBqWritesPerMin(telemetry.policy.maxWritesPerMinuteQuota);
+      setSheetBqBatchingEnabled(telemetry.policy.enableWriteAheadBatching);
+    }
+  };
+
   const loadCfWafStatus = async () => {
     setCfLoading(true);
     try {
@@ -203,6 +238,7 @@ export function KonfigurasiView({
 
   useEffect(() => {
     loadProxyStats();
+    loadSheetBqTelemetry();
     loadBqStatus();
     loadCfWafStatus();
     fetchAuthSheetConfigFromServer(currentSuperAdminEmail).then((res) => {
@@ -218,6 +254,49 @@ export function KonfigurasiView({
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentSuperAdminEmail]);
+
+  const handleSaveSheetBqPolicy = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSheetBqNotice(null);
+    setSheetBqSaving(true);
+    try {
+      const res = await updateSheetBqPolicy(currentSuperAdminEmail, {
+        partitionStrategy: sheetBqPartitionStrategy,
+        maxRowsPerPartition: sheetBqMaxRows,
+        batchMaxSize: sheetBqBatchSize,
+        maxWritesPerMinuteQuota: sheetBqWritesPerMin,
+        enableWriteAheadBatching: sheetBqBatchingEnabled,
+      });
+      setSheetBqNotice({
+        type: res.ok ? 'success' : 'error',
+        text: res.message,
+      });
+      if (res.telemetry) {
+        setSheetBqTelemetry(res.telemetry);
+      }
+    } finally {
+      setSheetBqSaving(false);
+    }
+  };
+
+  const handleFlushSheetBqQueue = async () => {
+    setSheetBqNotice(null);
+    setSheetBqFlushing(true);
+    try {
+      const res = await flushSheetBqQueue();
+      setSheetBqNotice({
+        type: res.ok ? 'success' : 'error',
+        text: res.message,
+      });
+      if (res.telemetry) {
+        setSheetBqTelemetry(res.telemetry);
+      } else {
+        await loadSheetBqTelemetry();
+      }
+    } finally {
+      setSheetBqFlushing(false);
+    }
+  };
 
   const handleSaveCloudflareWaf = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -866,6 +945,239 @@ export function KonfigurasiView({
               otomatis menyisipkan kunci ini secara rahasia.
             </p>
           </div>
+        </div>
+      </section>
+
+      {/* SECTION B1b: POLA PENYIMPANAN GOOGLE SHEET ALA BIGQUERY (TAHAN KAPASITAS & KUOTA) */}
+      <section className="bg-white border border-slate-200 rounded-lg overflow-hidden">
+        <div className="px-6 py-4 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-start gap-2.5">
+            <div className="w-8 h-8 rounded-md bg-[#0B1B2B] text-teal-400 flex items-center justify-center shrink-0 mt-0.5">
+              <Database className="w-4 h-4" />
+            </div>
+            <div>
+              <h2 className="text-base font-semibold text-slate-900">
+                Pola Data Google Sheet ala BigQuery (Tahan Kapasitas &amp; Kuota)
+              </h2>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Menerapkan partisi tabel otomatis (Tahunan/Bulanan/Shard),
+                manifest <code className="font-mono">_BQ_MANIFEST</code>, antrean
+                Write-Ahead Micro-Batch (<code className="font-mono">setValues</code>),
+                pembacaan bertahap per chunk, dan penahan batas kuota Google.
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={loadSheetBqTelemetry}
+              className="inline-flex items-center gap-1.5 h-8 px-3 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-md hover:bg-slate-50"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              Segarkan
+            </button>
+            <button
+              type="button"
+              disabled={sheetBqFlushing}
+              onClick={handleFlushSheetBqQueue}
+              className="inline-flex items-center gap-1.5 h-8 px-3.5 text-xs font-semibold text-white bg-teal-700 rounded-md hover:bg-teal-800 disabled:opacity-60"
+            >
+              <Zap className="w-3.5 h-3.5" />
+              {sheetBqFlushing ? 'Mengirim Batch...' : 'Flush Antrean ke Sheet'}
+            </button>
+          </div>
+        </div>
+
+        <div className="p-6 space-y-5">
+          {sheetBqNotice && (
+            <div
+              className={`p-3 text-xs rounded-md border ${
+                sheetBqNotice.type === 'success'
+                  ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                  : 'bg-red-50 border-red-200 text-red-700'
+              }`}
+            >
+              {sheetBqNotice.text}
+            </div>
+          )}
+
+          {/* Telemetri Kuota & Penghematan Micro-Batch */}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-md">
+              <p className="text-[11px] font-medium text-slate-500">
+                Antrean Write-Ahead
+              </p>
+              <p className="mt-1 text-xl font-semibold font-mono tabular-nums text-slate-900">
+                {sheetBqTelemetry?.queueDepth ?? 0}
+              </p>
+              <p className="text-[11px] text-slate-500 mt-0.5">
+                Tersimpan aman di server · Siap batch
+              </p>
+            </div>
+            <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-md">
+              <p className="text-[11px] font-medium text-slate-500">
+                Kuota Tulis / Menit
+              </p>
+              <p className="mt-1 text-xl font-semibold font-mono tabular-nums text-teal-700">
+                {sheetBqTelemetry?.writesLastMinute ?? 0} /{' '}
+                {sheetBqTelemetry?.policy.maxWritesPerMinuteQuota ?? 45}
+              </p>
+              <p className="text-[11px] text-slate-500 mt-0.5">
+                {sheetBqTelemetry?.retriesSucceeded ?? 0} retry backoff sukses
+              </p>
+            </div>
+            <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-md">
+              <p className="text-[11px] font-medium text-slate-500">
+                Penghematan Kuota Eksekusi
+              </p>
+              <p className="mt-1 text-xl font-semibold font-mono tabular-nums text-emerald-700">
+                {sheetBqTelemetry?.quotaCallsSavedPct ?? 0}%
+              </p>
+              <p className="text-[11px] text-slate-500 mt-0.5">
+                {sheetBqTelemetry?.totalFlushedRows ?? 0} baris via{' '}
+                {sheetBqTelemetry?.totalFlushedBatches ?? 0} batch
+              </p>
+            </div>
+            <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-md">
+              <p className="text-[11px] font-medium text-slate-500">
+                Strategi Partisi Aktif
+              </p>
+              <p className="mt-1 text-sm font-semibold font-mono text-slate-900">
+                {sheetBqTelemetry?.policy.partitionStrategy ?? 'TIME_YEAR'}
+              </p>
+              <p className="text-[11px] text-slate-500 mt-0.5">
+                Maks{' '}
+                {(
+                  sheetBqTelemetry?.policy.maxRowsPerPartition ?? 25000
+                ).toLocaleString('id-ID')}{' '}
+                baris/partisi
+              </p>
+            </div>
+          </div>
+
+          {/* Pengaturan Kebijakan Partisi & Batas Kuota */}
+          <form
+            onSubmit={handleSaveSheetBqPolicy}
+            className="p-4 bg-slate-50 border border-slate-200 rounded-md space-y-4"
+          >
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+              <div>
+                <label
+                  htmlFor="bq-pattern-strategy"
+                  className="block text-xs font-medium text-slate-700 mb-1"
+                >
+                  Strategi Partisi Sheet
+                </label>
+                <select
+                  id="bq-pattern-strategy"
+                  value={sheetBqPartitionStrategy}
+                  onChange={(e) =>
+                    setSheetBqPartitionStrategy(
+                      e.target.value as SheetPartitionStrategy
+                    )
+                  }
+                  className="w-full h-9 px-2.5 text-xs bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
+                >
+                  <option value="TIME_YEAR">
+                    Partisi Tahunan (Tab__2026)
+                  </option>
+                  <option value="TIME_MONTH">
+                    Partisi Bulanan (Tab__2026_11)
+                  </option>
+                  <option value="ROW_SHARD">
+                    Shard Kapasitas Baris (__P2)
+                  </option>
+                  <option value="SINGLE">
+                    Tab Tunggal + Guard Rollover
+                  </option>
+                </select>
+              </div>
+
+              <div>
+                <label
+                  htmlFor="bq-pattern-max-rows"
+                  className="block text-xs font-medium text-slate-700 mb-1"
+                >
+                  Batas Baris per Partisi
+                </label>
+                <input
+                  id="bq-pattern-max-rows"
+                  type="number"
+                  min={1000}
+                  max={100000}
+                  step={1000}
+                  value={sheetBqMaxRows}
+                  onChange={(e) => setSheetBqMaxRows(Number(e.target.value))}
+                  className="w-full h-9 px-3 text-xs font-mono bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
+                />
+              </div>
+
+              <div>
+                <label
+                  htmlFor="bq-pattern-batch-size"
+                  className="block text-xs font-medium text-slate-700 mb-1"
+                >
+                  Ukuran Micro-Batch (baris)
+                </label>
+                <input
+                  id="bq-pattern-batch-size"
+                  type="number"
+                  min={5}
+                  max={250}
+                  value={sheetBqBatchSize}
+                  onChange={(e) => setSheetBqBatchSize(Number(e.target.value))}
+                  className="w-full h-9 px-3 text-xs font-mono bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
+                />
+              </div>
+
+              <div>
+                <label
+                  htmlFor="bq-pattern-quota-rpm"
+                  className="block text-xs font-medium text-slate-700 mb-1"
+                >
+                  Batas Kuota Tulis / Menit
+                </label>
+                <input
+                  id="bq-pattern-quota-rpm"
+                  type="number"
+                  min={10}
+                  max={120}
+                  value={sheetBqWritesPerMin}
+                  onChange={(e) =>
+                    setSheetBqWritesPerMin(Number(e.target.value))
+                  }
+                  className="w-full h-9 px-3 text-xs font-mono bg-white border border-slate-300 rounded-md focus:outline-none focus:border-slate-900"
+                />
+              </div>
+            </div>
+
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-2 border-t border-slate-200/80">
+              <label className="inline-flex items-center gap-2 text-xs text-slate-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={sheetBqBatchingEnabled}
+                  onChange={(e) =>
+                    setSheetBqBatchingEnabled(e.target.checked)
+                  }
+                  className="rounded border-slate-300 text-teal-700 focus:ring-teal-700"
+                />
+                <span>
+                  Aktifkan Write-Ahead Micro-Batching (gabung input beruntun
+                  menjadi 1 eksekusi <code className="font-mono">setValues</code>
+                  )
+                </span>
+              </label>
+
+              <button
+                type="submit"
+                disabled={sheetBqSaving}
+                className="inline-flex items-center gap-1.5 h-9 px-4 text-xs font-semibold text-white bg-[#0B1B2B] rounded-md hover:bg-slate-800 disabled:opacity-60 whitespace-nowrap self-start sm:self-auto"
+              >
+                <Save className="w-3.5 h-3.5" />
+                {sheetBqSaving ? 'Menyimpan...' : 'Simpan Kebijakan'}
+              </button>
+            </div>
+          </form>
         </div>
       </section>
 
@@ -1520,6 +1832,7 @@ export function KonfigurasiView({
                   <thead>
                     <tr className="bg-white border-b border-slate-200 text-[11px] text-slate-500">
                       <th className="py-2 px-3">Dataset OPD</th>
+                      <th className="py-2 px-3 text-right">Partisi / Shard</th>
                       <th className="py-2 px-3 text-right">Baris × Kolom</th>
                       <th className="py-2 px-3 text-right">Total Sel</th>
                       <th className="py-2 px-3 text-right">% Batas 10 Jt</th>
@@ -1527,13 +1840,20 @@ export function KonfigurasiView({
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
-                    {evaluateSheetCapacity(sheets, rowsBySheet).map((cap) => (
+                    {evaluateSheetCapacity(
+                      sheets,
+                      rowsBySheet,
+                      sheetBqMaxRows
+                    ).map((cap) => (
                       <tr key={cap.sheetId}>
                         <td className="py-1.5 px-3 font-medium text-slate-800">
                           {cap.judulDataset}{' '}
                           <span className="text-[11px] text-slate-400">
                             ({cap.sheetName})
                           </span>
+                        </td>
+                        <td className="py-1.5 px-3 text-right font-mono tabular-nums text-slate-600">
+                          {cap.partitionCount} partisi
                         </td>
                         <td className="py-1.5 px-3 text-right font-mono tabular-nums text-slate-600">
                           {cap.rows.toLocaleString('id-ID')} × {cap.cols}
@@ -1549,7 +1869,8 @@ export function KonfigurasiView({
                             className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold ${
                               cap.status === 'Aman'
                                 ? 'bg-emerald-50 text-emerald-700'
-                                : cap.status === 'Pantau'
+                                : cap.status === 'Pantau' ||
+                                    cap.status === 'Perlu Pecah Partisi'
                                   ? 'bg-amber-50 text-amber-700'
                                   : 'bg-red-50 text-red-700'
                             }`}

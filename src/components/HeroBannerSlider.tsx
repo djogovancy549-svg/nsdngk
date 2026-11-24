@@ -86,7 +86,7 @@ export function HeroBannerSlider({ compact = false }: HeroBannerSliderProps) {
       aria-label="Galeri Sorotan Kabupaten Nagekeo"
       onMouseEnter={() => setPaused(true)}
       onMouseLeave={() => setPaused(false)}
-      className={`relative w-full overflow-hidden rounded-lg border border-slate-200 bg-[#0B1B2B] ${
+      className={`relative w-full overflow-hidden rounded-xl border border-slate-200/80 bg-[#07131F] shadow-[0_8px_30px_-14px_rgba(7,19,31,0.35)] ${
         compact ? 'h-[220px] sm:h-[260px]' : 'h-[260px] sm:h-[320px] lg:h-[360px]'
       }`}
     >
@@ -113,9 +113,9 @@ export function HeroBannerSlider({ compact = false }: HeroBannerSliderProps) {
                 className="w-full h-full object-cover"
               />
             ) : (
-              <div className="w-full h-full bg-gradient-to-br from-[#0B1B2B] via-[#132F4C] to-[#0F4C5C]" />
+              <div className="w-full h-full bg-gradient-to-br from-[#07131F] via-[#132F4C] to-[#0F4C5C]" />
             )}
-            <div className="absolute inset-0 bg-gradient-to-t from-[#0B1B2B]/90 via-[#0B1B2B]/45 to-[#0B1B2B]/15" />
+            <div className="absolute inset-0 bg-gradient-to-t from-[#07131F]/90 via-[#07131F]/40 to-[#07131F]/10" />
           </div>
         );
       })}
@@ -164,7 +164,7 @@ export function HeroBannerSlider({ compact = false }: HeroBannerSliderProps) {
               type="button"
               onClick={handlePrev}
               aria-label="Slide sebelumnya"
-              className="w-8 h-8 rounded-md bg-slate-950/55 border border-white/20 text-white flex items-center justify-center hover:bg-slate-950/80 transition-colors"
+              className="w-8 h-8 rounded-lg bg-slate-950/50 backdrop-blur-xs border border-white/20 text-white flex items-center justify-center hover:bg-slate-950/75 transition-colors"
             >
               <ChevronLeft className="w-4 h-4" />
             </button>
@@ -172,7 +172,7 @@ export function HeroBannerSlider({ compact = false }: HeroBannerSliderProps) {
               type="button"
               onClick={handleNext}
               aria-label="Slide berikutnya"
-              className="w-8 h-8 rounded-md bg-slate-950/55 border border-white/20 text-white flex items-center justify-center hover:bg-slate-950/80 transition-colors"
+              className="w-8 h-8 rounded-lg bg-slate-950/50 backdrop-blur-xs border border-white/20 text-white flex items-center justify-center hover:bg-slate-950/75 transition-colors"
             >
               <ChevronRight className="w-4 h-4" />
             </button>

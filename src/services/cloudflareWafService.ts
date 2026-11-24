@@ -534,12 +534,16 @@ export interface SheetCapacitySummary {
   cols: number;
   usedCells: number;
   usagePct: number;
-  status: 'Aman' | 'Pantau' | 'Perlu Arsip BigQuery';
+  partitionCount: number;
+  maxRowsPerPartition: number;
+  needsPartitionSplit: boolean;
+  status: 'Aman' | 'Pantau' | 'Perlu Pecah Partisi' | 'Perlu Arsip BigQuery';
 }
 
 export function evaluateSheetCapacity(
   sheets: OpdDynamicSheet[],
-  rowsBySheet: Record<string, DynamicSheetRow[]>
+  rowsBySheet: Record<string, DynamicSheetRow[]>,
+  maxRowsPerPartition = 25_000
 ): SheetCapacitySummary[] {
   return sheets.map((s) => {
     const rows = (rowsBySheet[s.id] ?? []).length;
@@ -548,8 +552,18 @@ export function evaluateSheetCapacity(
     const usagePct = Number(
       ((usedCells / GOOGLE_SHEET_MAX_CELLS) * 100).toFixed(3)
     );
+    const manifestCount = s.partitionManifest?.length ?? 0;
+    const computedShards = Math.max(
+      1,
+      Math.ceil(Math.max(1, rows) / Math.max(1000, maxRowsPerPartition))
+    );
+    const partitionCount = Math.max(manifestCount, computedShards);
+    const needsPartitionSplit =
+      rows > maxRowsPerPartition && manifestCount <= 1;
+
     let status: SheetCapacitySummary['status'] = 'Aman';
-    if (usedCells >= 5_000_000) status = 'Perlu Arsip BigQuery';
+    if (usedCells >= 7_500_000) status = 'Perlu Arsip BigQuery';
+    else if (needsPartitionSplit) status = 'Perlu Pecah Partisi';
     else if (usedCells >= 1_500_000) status = 'Pantau';
 
     return {
@@ -561,6 +575,9 @@ export function evaluateSheetCapacity(
       cols,
       usedCells,
       usagePct,
+      partitionCount,
+      maxRowsPerPartition,
+      needsPartitionSplit,
       status,
     };
   });

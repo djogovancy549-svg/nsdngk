@@ -11,6 +11,16 @@ import {
   syncOpdSheetToBigQuery,
   testBigQueryConnection,
 } from './server/bigQueryService.ts';
+import {
+  derivePartitionKey,
+  enqueueSheetMutationOp,
+  fetchSheetWithChunkedPagination,
+  flushSheetBqQueue,
+  getSheetBqPolicy,
+  getSheetBqTelemetry,
+  postWebhookWithRetry,
+  updateSheetBqPolicy,
+} from './server/sheetBqPattern.ts';
 
 dotenv.config();
 
@@ -2455,9 +2465,12 @@ async function startServer() {
       });
     }
 
-    // GET request: gunakan Smart Cache (45 detik) + In-Flight Deduplication
+    const partition = String(req.body?.partition || '').trim();
+    const fields = String(req.body?.fields || '').trim();
+
+    // GET request: gunakan Smart Cache (45 detik) + In-Flight Deduplication + Chunked Pagination ala BigQuery
     if (method === 'GET') {
-      const cacheKey = `${webhookUrl}::${sheetName}::${action}`;
+      const cacheKey = `${webhookUrl}::${sheetName}::${action}::${partition}::${fields}`;
       const now = Date.now();
       const startMs = Date.now();
 
@@ -2482,30 +2495,21 @@ async function startServer() {
       let inFlight = sheetInFlight.get(cacheKey);
       if (!inFlight) {
         inFlight = (async () => {
-          const reqStart = Date.now();
-          const targetUrl = new URL(webhookUrl);
-          targetUrl.searchParams.set('action', action);
-          if (sheetName) targetUrl.searchParams.set('sheet', sheetName);
-          // Sisipkan kunci rahasia server secara otomatis (tidak pernah terekspos ke browser)
-          targetUrl.searchParams.set('secret', serverSecrets.appsScriptSecret);
-
-          const upstream = await fetch(targetUrl.toString(), {
-            method: 'GET',
-            headers: { Accept: 'application/json' },
-            redirect: 'follow',
+          const chunked = await fetchSheetWithChunkedPagination({
+            webhookUrl,
+            sheetName,
+            action,
+            secret: serverSecrets.appsScriptSecret,
+            partition: partition || undefined,
+            fields: fields || undefined,
           });
-          const latencyMs = Date.now() - reqStart;
-          sheetProxyStats.totalUpstreamMs += latencyMs;
-          sheetProxyStats.upstreamCalls++;
-
-          const text = await upstream.text();
-          let parsed: unknown = null;
-          try {
-            parsed = JSON.parse(text);
-          } catch {
-            parsed = { ok: false, error: 'Respons Google Apps Script bukan JSON valid.' };
-          }
-          return { status: upstream.status, data: parsed, latencyMs };
+          sheetProxyStats.totalUpstreamMs += chunked.latencyMs;
+          sheetProxyStats.upstreamCalls += chunked.pagesFetched;
+          return {
+            status: chunked.status,
+            data: chunked.data,
+            latencyMs: chunked.latencyMs,
+          };
         })().finally(() => {
           sheetInFlight.delete(cacheKey);
         });
@@ -2545,35 +2549,37 @@ async function startServer() {
       }
     }
 
-    // POST mutation (create/update/delete): sisipkan secret server & hapus cache terkait
+    // POST mutation (create/update/delete): sisipkan secret server, partition routing & retry backoff kuota
     if (method === 'POST') {
-      const reqStart = Date.now();
       try {
-        const upstream = await fetch(webhookUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-          redirect: 'follow',
-          body: JSON.stringify({
+        const policy = getSheetBqPolicy();
+        const rowValues =
+          payload.values && typeof payload.values === 'object'
+            ? (payload.values as Record<string, string>)
+            : {};
+        const resolvedPartitionKey =
+          String(payload.partitionKey || '').trim() ||
+          derivePartitionKey(policy.partitionStrategy, rowValues);
+
+        const upstream = await postWebhookWithRetry(
+          webhookUrl,
+          {
             ...payload,
             action,
             sheetName,
-            secret: serverSecrets.appsScriptSecret,
-          }),
-        });
-        const latencyMs = Date.now() - reqStart;
+            partitionMode: policy.partitionStrategy,
+            partitionKey: resolvedPartitionKey,
+            maxRowsPerPartition: policy.maxRowsPerPartition,
+          },
+          serverSecrets.appsScriptSecret
+        );
         invalidateSheetCacheByWebhook(webhookUrl);
 
-        const text = await upstream.text();
-        let parsed: unknown = null;
-        try {
-          parsed = JSON.parse(text);
-        } catch {
-          parsed = { ok: upstream.ok };
-        }
         return res.status(upstream.ok ? 200 : upstream.status).json({
           ok: upstream.ok,
-          latencyMs,
-          data: parsed,
+          latencyMs: upstream.latencyMs,
+          partitionKey: resolvedPartitionKey,
+          data: upstream.data,
         });
       } catch (err) {
         return res.status(502).json({
@@ -2660,6 +2666,226 @@ async function startServer() {
       message:
         'Kunci Rahasia Webhook (API_SECRET) baru berhasil dibuat. Perbarui konstanta API_SECRET di Code.gs jika mengaktifkan kunci ketat.',
     });
+  });
+
+  // 1a-3b. Pola Data Google Sheet ala BigQuery (Partisi, Write-Ahead Micro-Batching, Quota Guard)
+  app.get('/api/sheets/bq-pattern/status', (_req, res) => {
+    return res.json({
+      ok: true,
+      telemetry: getSheetBqTelemetry(),
+    });
+  });
+
+  app.put('/api/sheets/bq-pattern/policy', (req, res) => {
+    if (!requireSuperAdminActor(req, res)) return;
+    const body = req.body || {};
+    const updated = updateSheetBqPolicy({
+      partitionStrategy: body.partitionStrategy,
+      maxRowsPerPartition: body.maxRowsPerPartition,
+      workbookCellBudgetPct: body.workbookCellBudgetPct,
+      enableWriteAheadBatching: body.enableWriteAheadBatching,
+      batchFlushIntervalSec: body.batchFlushIntervalSec,
+      batchMaxSize: body.batchMaxSize,
+      maxWritesPerMinuteQuota: body.maxWritesPerMinuteQuota,
+      retryMaxAttempts: body.retryMaxAttempts,
+    });
+    return res.json({
+      ok: true,
+      policy: updated,
+      telemetry: getSheetBqTelemetry(),
+      message: `Kebijakan pola BigQuery Google Sheet (${updated.partitionStrategy}, maks ${updated.maxRowsPerPartition.toLocaleString('id-ID')} baris/partisi) berhasil diperbarui.`,
+    });
+  });
+
+  app.post('/api/sheets/bq-pattern/enqueue', async (req, res) => {
+    const sheetId = String(req.body?.sheetId || '').trim();
+    const judulDataset = String(req.body?.judulDataset || sheetId).trim();
+    const webhookUrl = String(req.body?.webhookUrl || '').trim();
+    const sheetName = String(req.body?.sheetName || 'Sheet1').trim();
+    const action = String(req.body?.action || '').trim() as
+      | 'create'
+      | 'update'
+      | 'delete';
+    const row =
+      req.body?.row && typeof req.body.row === 'object'
+        ? (req.body.row as Record<string, unknown>)
+        : {};
+    const flushNow = Boolean(req.body?.flushNow);
+
+    if (!sheetId || !['create', 'update', 'delete'].includes(action)) {
+      return res.status(400).json({
+        ok: false,
+        message: 'Permintaan write-ahead sheet tidak lengkap.',
+      });
+    }
+
+    if (!isAllowedGoogleScriptUrl(webhookUrl)) {
+      return res.status(400).json({
+        ok: false,
+        message: 'URL Webhook Google Apps Script tidak valid.',
+      });
+    }
+
+    const rowValues: Record<string, string> = {};
+    if (row.values && typeof row.values === 'object') {
+      for (const [k, v] of Object.entries(row.values as Record<string, unknown>)) {
+        rowValues[String(k)] = String(v ?? '').slice(0, 4000);
+      }
+    }
+
+    const policy = getSheetBqPolicy();
+    const partitionKey =
+      String(row._partitionKey || req.body?.partitionKey || '').trim() ||
+      derivePartitionKey(policy.partitionStrategy, rowValues);
+
+    // 1. Selalu commit seketika ke Sovereign Store agar durabilitas data 0ms tidak pernah hilang
+    const currentRows = [...(sovereignSheetsStore.rowsBySheet[sheetId] || [])];
+    const rowId = String(row._id || `${sheetId}-srv-${Date.now().toString(36)}`);
+    const nowDate = new Date().toISOString().slice(0, 10);
+    let assignedRowNumber = Number(row._rowNumber || currentRows.length + 2);
+
+    let nextRows: SovereignRowRecord[] = currentRows;
+    if (action === 'create') {
+      assignedRowNumber = currentRows.length + 2;
+      nextRows = [
+        {
+          _id: rowId,
+          _rowNumber: assignedRowNumber,
+          _updatedAt: nowDate,
+          values: rowValues,
+        },
+        ...currentRows,
+      ];
+    } else if (action === 'update') {
+      const idx = currentRows.findIndex((r) => r._id === rowId);
+      const updatedRecord: SovereignRowRecord = {
+        _id: rowId,
+        _rowNumber: assignedRowNumber,
+        _updatedAt: nowDate,
+        values: rowValues,
+      };
+      nextRows =
+        idx >= 0
+          ? currentRows.map((r, i) => (i === idx ? updatedRecord : r))
+          : [updatedRecord, ...currentRows];
+    } else if (action === 'delete') {
+      nextRows = currentRows.filter((r) => r._id !== rowId);
+    }
+
+    const existingSheet = sovereignSheetsStore.sheets[sheetId];
+    const nextSheets = existingSheet
+      ? {
+          ...sovereignSheetsStore.sheets,
+          [sheetId]: {
+            ...existingSheet,
+            terakhirSinkron: new Date().toISOString(),
+          },
+        }
+      : sovereignSheetsStore.sheets;
+
+    sovereignSheetsStore = saveSovereignSheetsStore({
+      sheets: nextSheets,
+      rowsBySheet: {
+        ...sovereignSheetsStore.rowsBySheet,
+        [sheetId]: nextRows,
+      },
+      updatedAt: sovereignSheetsStore.updatedAt,
+    });
+
+    // 2. Masukkan ke Write-Ahead Micro-Batch Queue untuk Google Sheet
+    const enqueued = enqueueSheetMutationOp({
+      sheetId,
+      judulDataset,
+      webhookUrl,
+      sheetName,
+      action,
+      rowNumber: assignedRowNumber,
+      values: rowValues,
+      partitionKey,
+    });
+
+    if (flushNow || enqueued.shouldFlushNow) {
+      const flushRes = await flushSheetBqQueue({
+        secret: serverSecrets.appsScriptSecret,
+        onlySheetId: sheetId,
+        onWebhookMutated: (url) => invalidateSheetCacheByWebhook(url),
+      });
+
+      return res.json({
+        ok: true,
+        mode: 'flushed_batch',
+        partitionKey,
+        rowNumber: assignedRowNumber,
+        flushedRows: flushRes.flushedRows,
+        remainingQueue: flushRes.remainingQueue,
+        message:
+          flushRes.errors.length === 0
+            ? `Data tersimpan ke Server & disinkronkan via Micro-Batch pola BigQuery ke partisi "${partitionKey}" Google Sheet.`
+            : `Data aman tersimpan di Server Sovereign Store. Pengiriman ke Google Sheet dijadwalkan ulang (${flushRes.errors[0]}).`,
+      });
+    }
+
+    return res.json({
+      ok: true,
+      mode: 'queued_write_ahead',
+      partitionKey,
+      rowNumber: assignedRowNumber,
+      queueDepth: enqueued.queueDepth,
+      message: `Data aman tersimpan instan di Server & masuk antrean Micro-Batch partisi "${partitionKey}" (${enqueued.queueDepth} antrean hemat kuota Google Sheet).`,
+    });
+  });
+
+  app.post('/api/sheets/bq-pattern/flush', async (req, res) => {
+    const onlySheetId = req.body?.sheetId ? String(req.body.sheetId).trim() : undefined;
+    const result = await flushSheetBqQueue({
+      secret: serverSecrets.appsScriptSecret,
+      onlySheetId,
+      onWebhookMutated: (url) => invalidateSheetCacheByWebhook(url),
+    });
+
+    return res.json({
+      ok: result.errors.length === 0,
+      ...result,
+      telemetry: getSheetBqTelemetry(),
+      message:
+        result.flushedRows > 0
+          ? `${result.flushedRows} baris dari ${result.flushedBatches} batch berhasil ditulis ke partisi Google Sheet.`
+          : result.errors.length > 0
+          ? `Sebagian antrean tertunda: ${result.errors[0]}`
+          : 'Tidak ada antrean batch yang menunggu.',
+    });
+  });
+
+  app.post('/api/sheets/bq-pattern/manifest', async (req, res) => {
+    const webhookUrl = String(req.body?.webhookUrl || '').trim();
+    const sheetName = String(req.body?.sheetName || '').trim();
+    if (!isAllowedGoogleScriptUrl(webhookUrl)) {
+      return res.status(400).json({
+        ok: false,
+        message: 'URL Webhook Google Apps Script tidak valid.',
+      });
+    }
+
+    try {
+      const result = await fetchSheetWithChunkedPagination({
+        webhookUrl,
+        sheetName,
+        action: 'manifest',
+        secret: serverSecrets.appsScriptSecret,
+      });
+      return res.status(result.status >= 400 ? result.status : 200).json({
+        ok: result.status >= 200 && result.status < 300,
+        latencyMs: result.latencyMs,
+        manifest: result.data,
+      });
+    } catch (err) {
+      return res.status(502).json({
+        ok: false,
+        message: `Gagal membaca manifest partisi Google Sheet: ${
+          err instanceof Error ? err.message : 'Network error'
+        }`,
+      });
+    }
   });
 
   // 1a-4. Google BigQuery Data Warehouse Connector (Opsional / Additive, Kedaulatan Data Jakarta asia-southeast2)
@@ -4161,6 +4387,18 @@ ${sample.slice(0, 4000)}
     });
     app.use(vite.middlewares);
   }
+
+  // Background Micro-Batch Flusher untuk Pola Data Google Sheet ala BigQuery
+  const bqFlushTimer = setInterval(() => {
+    const telemetry = getSheetBqTelemetry();
+    if (telemetry.queueDepth > 0) {
+      void flushSheetBqQueue({
+        secret: serverSecrets.appsScriptSecret,
+        onWebhookMutated: (url) => invalidateSheetCacheByWebhook(url),
+      });
+    }
+  }, 5000);
+  bqFlushTimer.unref?.();
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Satu Data Nagekeo server listening on http://0.0.0.0:${PORT}`);

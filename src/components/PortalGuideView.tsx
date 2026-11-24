@@ -9,32 +9,24 @@ import {
   FolderTree,
   Layers,
   Lock,
-  LogIn,
   ShieldCheck,
-  UserPlus,
   Zap,
 } from 'lucide-react';
 import { RegencyWhiteLabelConfig } from '../services/regencyConfigService';
 
 interface PortalGuideViewProps {
   regencyConfig: RegencyWhiteLabelConfig;
-  onGoToLogin: () => void;
-  onGoToRegister: () => void;
 }
 
 type GuideTab = 'keunggulan' | 'opd' | 'superadmin' | 'wilayah';
 
-export function PortalGuideView({
-  regencyConfig,
-  onGoToLogin,
-  onGoToRegister,
-}: PortalGuideViewProps) {
+export function PortalGuideView({ regencyConfig }: PortalGuideViewProps) {
   const [activeTab, setActiveTab] = useState<GuideTab>('keunggulan');
 
   return (
     <div className="space-y-6">
       {/* Header Banner */}
-      <div className="bg-white border border-slate-200 rounded-lg p-6 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+      <div className="bg-white border border-slate-200 rounded-xl p-6">
         <div className="space-y-1.5 max-w-3xl">
           <div className="inline-flex items-center gap-1.5 text-xs font-medium text-teal-700">
             <BookOpen className="w-3.5 h-3.5" />
@@ -56,25 +48,6 @@ export function PortalGuideView({
             Desa/Kelurahan agar data sektoral tetap cepat, rapi, dan berdaulat
             hingga 20 tahun ke depan.
           </p>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2 shrink-0">
-          <button
-            type="button"
-            onClick={onGoToLogin}
-            className="inline-flex items-center gap-1.5 h-9 px-3.5 text-xs font-semibold text-white bg-[#0B1B2B] rounded-md hover:bg-slate-800 whitespace-nowrap"
-          >
-            <LogIn className="w-3.5 h-3.5" />
-            Masuk Portal
-          </button>
-          <button
-            type="button"
-            onClick={onGoToRegister}
-            className="inline-flex items-center gap-1.5 h-9 px-3.5 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-md hover:bg-slate-50 whitespace-nowrap"
-          >
-            <UserPlus className="w-3.5 h-3.5" />
-            Daftar Akun OPD
-          </button>
         </div>
       </div>
 

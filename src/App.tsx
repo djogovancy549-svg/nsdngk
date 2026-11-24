@@ -533,6 +533,7 @@ export default function App() {
                 ...item,
                 headers: resolvedHeaders,
                 availableTabs: res.availableTabs ?? item.availableTabs,
+                partitionManifest: res.partitions ?? item.partitionManifest,
                 terakhirSinkron: res.syncedAt,
               };
             }
@@ -871,6 +872,7 @@ export default function App() {
       headers:
         synced.headers.length > 0 ? synced.headers : updatedBase.headers,
       availableTabs: synced.availableTabs ?? updatedBase.availableTabs,
+      partitionManifest: synced.partitions ?? updatedBase.partitionManifest,
       terakhirSinkron: synced.syncedAt,
     };
 
